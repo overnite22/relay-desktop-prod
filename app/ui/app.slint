@@ -1,0 +1,1608 @@
+import { Button, LineEdit, ComboBox, CheckBox, TextEdit, ListView, ScrollView, Palette } from "std-widgets.slint";
+
+export struct TreeRow { folder: bool, depth: int, expanded: bool, children: bool, name: string, kind: string, detail: string, status: int, favorite: bool }
+export struct Field { label: string, value: string }
+export struct SessionTab { title: string, kind: string, state: string }
+export struct CredRow { name: string, username: string, detail: string }
+export struct AvailRow { name: string, path: string, kind: string, endpoint: string, status: int, detail: string }
+export struct AuditRow { at: string, user: string, action: string, target: string, detail: string }
+export struct WsRow { name: string, detail: string }
+// Rendered Markdown block of the notes: kind "h" (depth = level), "p", "li", "code", "table", "quote", "hr".
+export struct NoteBlock { kind: string, text: styled-text, plain: string, depth: int, marker: string }
+// Generic list row for administration dialogs (attachments, devices, backups…).
+export struct ListRow { name: string, detail: string, extra: string, status: int }
+
+// Colors of the web version (styles.css), dark and light.
+export global Theme {
+    in-out property <bool> dark: true;
+    out property <color> bg: dark ? #1b1c1f : #f3f4f6;
+    out property <color> bg-elev: dark ? #232428 : #ffffff;
+    out property <color> bg-panel: dark ? #26272b : #fafafa;
+    out property <color> bg-ribbon: dark ? #2b2c31 : #ffffff;
+    out property <color> bg-hover: dark ? #33353b : #e8eef7;
+    out property <color> bg-input: dark ? #1d1e21 : #ffffff;
+    out property <color> bg-title: dark ? #141517 : #e9ebef;
+    out property <color> border: dark ? #3a3c42 : #d0d4db;
+    out property <color> border-soft: dark ? #2f3136 : #e2e5ea;
+    out property <color> text: dark ? #e4e4e7 : #1f2328;
+    out property <color> muted: dark ? #9a9ca5 : #646b75;
+    out property <color> accent: dark ? #2b7de9 : #1f6fd8;
+    out property <color> selection: dark ? #2a4a75 : #cfe2fb;
+}
+
+component Ico inherits Image {
+    in property <color> tint: Theme.text;
+    width: 16px;
+    height: 16px;
+    colorize: tint;
+    accessible-role: none;
+}
+
+component KindIcon inherits Image {
+    in property <string> kind;
+    width: 16px;
+    height: 16px;
+    accessible-role: none;
+    source: kind == "rdp" ? @image-url("icons/monitor.svg") : kind == "ssh" ? @image-url("icons/square-terminal.svg") : kind == "vnc" ? @image-url("icons/screen-share.svg") : kind == "web" ? @image-url("icons/globe.svg") : kind == "pve" ? @image-url("icons/boxes.svg") : kind == "folder-open" ? @image-url("icons/folder-open.svg") : kind == "credential" ? @image-url("icons/key-round.svg") : @image-url("icons/folder.svg");
+    colorize: kind == "rdp" ? #3b8eea : kind == "ssh" ? #3fb950 : kind == "vnc" ? #a371f7 : kind == "web" ? #f0883e : kind == "pve" ? #e57000 : kind == "credential" ? #d29922 : #e3b341;
+}
+
+// Large ribbon button (.rb-large)
+component RbLarge inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <color> tint: Theme.text;
+    in property <bool> enabled: true;
+    in property <bool> on;
+    callback clicked();
+    width: max(64px, min(86px, lbl.preferred-width + 14px));
+    height: 66px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: (ta.has-hover && root.enabled) || root.on ? Theme.border : transparent;
+    background: root.on ? Theme.selection : ta.has-hover && root.enabled ? Theme.bg-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    VerticalLayout {
+        padding-top: 6px;
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 4px;
+        alignment: start;
+        HorizontalLayout {
+            alignment: center;
+            Ico { source: root.icon; width: 26px; height: 26px; tint: root.enabled ? root.tint : Theme.muted.with-alpha(0.45); }
+        }
+        lbl := Text {
+            text: root.label;
+            font-size: 12px;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            color: root.enabled ? Theme.text : Theme.muted.with-alpha(0.55);
+        }
+    }
+}
+
+// Small ribbon button (.rb-small)
+component RbSmall inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <color> tint: Theme.text;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 21px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: ta.has-hover && root.enabled ? Theme.border : transparent;
+    background: ta.has-hover && root.enabled ? Theme.bg-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 8px;
+        spacing: 6px;
+        Ico { source: root.icon; width: 15px; height: 15px; y: 3px; tint: root.enabled ? root.tint : Theme.muted.with-alpha(0.45); }
+        Text { text: root.label; font-size: 12px; vertical-alignment: center; color: root.enabled ? Theme.text : Theme.muted.with-alpha(0.55); }
+    }
+}
+
+component RbColumn inherits VerticalLayout {
+    spacing: 1px;
+    alignment: start;
+    padding-top: 1px;
+}
+
+// Ribbon group with its label (.ribbon-group)
+component RGroup inherits HorizontalLayout {
+    in property <string> title;
+    VerticalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        HorizontalLayout {
+            spacing: 2px;
+            alignment: start;
+            vertical-stretch: 1;
+            @children
+        }
+        Text { text: root.title; font-size: 11px; color: Theme.muted; horizontal-alignment: center; }
+    }
+    Rectangle { width: 1px; background: Theme.border-soft; }
+}
+
+component FormRow inherits VerticalLayout {
+    in property <string> label;
+    spacing: 4px;
+    Text { text: root.label; font-size: 12px; color: Theme.muted; }
+    @children
+}
+
+component Dialog inherits Rectangle {
+    in property <string> title;
+    in property <string> error;
+    in property <string> ok-text: "OK";
+    in property <bool> show-ok: true;
+    in property <string> cancel-text: "Annuler";
+
+    in property <bool> busy;
+    in property <length> card-width: 520px;
+    callback ok();
+    callback cancel();
+    background: #00000099;
+    TouchArea { }
+    card := Rectangle {
+        width: min(root.width - 40px, root.card-width);
+        height: min(root.height - 40px, lay.preferred-height);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.bg-elev;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000080;
+        lay := VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            Text { text: root.title; font-size: 16px; font-weight: 600; color: Theme.text; }
+            @children
+            if root.error != "": Text { text: root.error; color: #f85149; wrap: word-wrap; }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button { text: root.cancel-text; clicked => { root.cancel(); } }
+                if root.show-ok: Button { text: root.busy ? "Patientez…" : root.ok-text; primary: true; enabled: !root.busy; clicked => { root.ok(); } }
+
+            }
+        }
+    }
+}
+
+component StatusDot inherits Rectangle {
+    in property <int> status;
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: status == 1 ? #3fb950 : status == 2 ? #f85149 : Theme.muted.with-alpha(0.5);
+}
+
+component SbSep inherits Rectangle {
+    width: 1px;
+    height: 14px;
+    background: #ffffff59;
+}
+
+export component AppWindow inherits Window {
+    title: "Relay";
+    icon: @image-url("icon.png");
+    preferred-width: 1200px;
+    preferred-height: 720px;
+    min-width: 860px;
+    min-height: 540px;
+    default-font-family: "Segoe UI";
+    default-font-size: 13px;
+    background: Theme.bg;
+
+    in-out property <bool> dark-mode <=> Theme.dark;
+    init => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+    changed dark-mode => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+
+    in property <[string]> source-names;
+    in-out property <int> source-index: -1;
+    in property <bool> connected;
+    in property <bool> server-mode;
+    in property <bool> busy;
+    in property <string> status;
+    in property <string> user-label;
+    in property <string> status-counts;
+    in property <string> status-path;
+    in property <string> version;
+    in-out property <int> rtab: 0;
+
+    in property <[TreeRow]> rows;
+    in-out property <int> selected: -1;
+    in-out property <string> search;
+
+    in property <string> detail-kind;
+    in property <string> detail-title;
+    in property <string> detail-subtitle;
+    in property <[Field]> detail-fields;
+    in property <string> detail-notes;
+    in property <[NoteBlock]> note-blocks;
+    in property <[ListRow]> att-rows;
+    in-out property <int> att-selected: -1;
+    in property <string> att-info;
+    in-out property <string> notes-text;
+    callback open-link(string);
+    in property <string> cmd-targets-text;
+    in-out property <string> cmd-text;
+    in-out property <bool> cmd-sudo;
+    in-out property <string> cmd-timeout: "60";
+    in property <[string]> cmd-saved-names;
+    in-out property <int> cmd-saved-index;
+    in-out property <string> cmd-name;
+    in property <[ListRow]> cmd-rows;
+    in-out property <int> cmd-selected: -1;
+    in property <string> cmd-output;
+    in property <string> cmd-summary;
+    in property <bool> cmd-running;
+    in-out property <string> bk-password;
+    in-out property <string> bk-password2;
+    in-out property <string> bk-restore-password;
+    in property <string> adm-title;
+    in property <string> adm-hint;
+    in property <[ListRow]> adm-rows;
+    in-out property <int> adm-selected: -1;
+    in property <string> adm-detail;
+    in property <[string]> adm-actions;
+    in-out property <string> imp-path;
+    in-out property <string> imp-root: "Import RDM";
+    in property <[string]> imp-cred-names;
+    in-out property <int> imp-ssh;
+    in-out property <int> imp-rdp;
+    in property <string> imp-summary;
+    in property <[ListRow]> imp-rows;
+    in property <bool> imp-ready;
+    in property <bool> can-open;
+    in property <bool> can-edit;
+    in property <bool> has-entry;
+    in property <bool> has-folder;
+    in property <bool> can-test;
+    in property <bool> is-favorite;
+    in property <string> entry-kind;
+    // SSH entries targeted by « Exécuter une commande » for the selection.
+    in property <int> ctx-ssh;
+
+    in property <[string]> kind-names: ["RDP", "SSH", "VNC", "Web"];
+    in property <[string]> credential-names;
+    in property <[string]> folder-names;
+
+    // Dialogs: "", "source", "unlock", "entry", "folder", "credential", "confirm", "quick", "creds",
+    // "folder-creds", "test", "availability", "audit", "workspaces", "about".
+    in-out property <string> dialog;
+    in-out property <string> dialog-error;
+    in-out property <int> src-type;
+    in-out property <string> src-name;
+    in-out property <string> src-url;
+    in-out property <string> src-token;
+    in-out property <string> src-path;
+    in-out property <bool> src-create: true;
+    in-out property <string> src-password;
+    in-out property <string> src-password2;
+    in-out property <string> unlock-name;
+    in-out property <string> unlock-password;
+    in-out property <string> e-title;
+    in-out property <string> e-name;
+    in-out property <int> e-kind;
+    in-out property <string> e-host;
+    in-out property <string> e-port;
+    in-out property <string> e-url;
+    in-out property <string> e-username;
+    in-out property <int> e-cred;
+    in-out property <int> e-folder;
+    in-out property <string> e-notes;
+    in-out property <string> f-title;
+    in-out property <string> f-name;
+    in-out property <int> f-parent;
+    in-out property <string> c-title: "Nouvel identifiant";
+    in-out property <string> c-name;
+    in-out property <string> c-username;
+    in-out property <string> c-domain;
+    in-out property <string> c-password;
+    in-out property <string> c-totp;
+    in-out property <string> c-notes;
+    in-out property <string> confirm-text;
+    in-out property <int> q-kind;
+    in-out property <string> q-host;
+    in-out property <string> q-port;
+    in-out property <int> q-cred;
+    in-out property <string> q-username;
+    in-out property <string> q-password;
+    in property <[CredRow]> cred-rows;
+    in-out property <int> cred-selected: -1;
+    in property <string> cred-info;
+    in-out property <int> fc-rdp;
+    in-out property <int> fc-ssh;
+    in-out property <int> fc-vnc;
+    in-out property <int> fc-web;
+    in property <string> test-text;
+    in property <[AvailRow]> avail-rows;
+    in-out property <bool> avail-failed-only;
+    in property <[AuditRow]> audit-rows;
+    in property <[WsRow]> ws-rows;
+    in-out property <int> ws-selected: -1;
+    in-out property <string> ws-name;
+
+    in property <[SessionTab]> tabs;
+    in-out property <int> active-tab: -1;
+    in property <image> term-image;
+    in property <string> session-banner;
+    in property <float> scale: 1;
+
+    callback act(string);
+    callback source-selected(int);
+    callback search-edited(string);
+    callback row-selected(int);
+    callback row-activated(int);
+    callback row-toggled(int);
+    callback tree-key(string);
+    callback browse-path();
+    callback submit-dialog();
+    callback cancel-dialog();
+    callback cred-selected-changed(int);
+    callback tab-activated(int);
+    callback tab-closed(int);
+    callback console-pointer(float,float,float,float,int);
+    callback console-key(string,bool);
+    callback term-key(string, bool, bool, bool);
+    callback term-size(length, length);
+    callback term-paste();
+    callback term-scroll(int);
+    in property <string> active-kind;
+    in property <bool> can-open-external;
+    callback open-external();
+    // Session area in window coordinates, for native child windows (RDP).
+    callback session-area(length, length, length, length);
+
+    callback open-session();
+    callback add-source();
+    callback remove-source();
+    callback refresh();
+    callback new-entry();
+    callback new-folder();
+    callback edit-selected();
+    callback delete-selected();
+    callback new-credential();
+    // In-app updates
+    callback check-updates();
+    callback update-auto-toggled(bool);
+    in-out property <string> upd-state;
+    in-out property <string> upd-current;
+    in-out property <string> upd-latest;
+    in-out property <string> upd-notes;
+    in-out property <string> upd-message;
+    in-out property <bool> upd-auto: true;
+
+
+    VerticalLayout {
+        // Ribbon tabs (.ribbon-tabs)
+        Rectangle {
+            height: 28px;
+            background: Theme.bg-title;
+            HorizontalLayout {
+                padding-left: 8px;
+                spacing: 2px;
+                alignment: start;
+                for t[i] in ["Accueil", "Affichage", "Administration", "Aide"]: Rectangle {
+                    width: tl.preferred-width + 28px;
+                    background: root.rtab == i ? Theme.bg-ribbon : transparent;
+                    accessible-role: tab;
+                    accessible-label: t;
+                    accessible-action-default => { root.rtab = i; }
+                    TouchArea { clicked => { root.rtab = i; } }
+                    tl := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: t;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: root.rtab == i || tab-hover.has-hover ? Theme.text : Theme.muted;
+                    }
+                    tab-hover := TouchArea { clicked => { root.rtab = i; } }
+                    Rectangle { y: parent.height - 2px; height: 2px; background: root.rtab == i ? Theme.accent : transparent; }
+                }
+            }
+        }
+        // Ribbon body (.ribbon-body)
+        Rectangle {
+            height: 92px;
+            background: Theme.bg-ribbon;
+            ScrollView {
+                height: parent.height - 1px;
+                content-width: max(self.visible-width, ribbon-content.min-width);
+                content-height: self.visible-height;
+                ribbon-content := HorizontalLayout {
+            if root.rtab == 0: HorizontalLayout {
+                padding-left: 6px;
+                padding-top: 4px;
+                alignment: start;
+                RGroup {
+                    title: "Session";
+                    RbLarge {
+                        icon: root.entry-kind == "web" ? @image-url("icons/external-link.svg") : @image-url("icons/play.svg");
+                        label: root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session";
+                        tint: #3fb950;
+                        enabled: root.has-entry;
+                        clicked => { root.act("open"); }
+                    }
+                    RbColumn {
+                        RbSmall { icon: @image-url("icons/circle-dot.svg"); label: "Ouvrir et enregistrer"; tint: #f85149; enabled: false; clicked => { root.act("record"); } }
+                        RbSmall { icon: @image-url("icons/activity.svg"); label: "Tester la connexion"; tint: #58a6ff; enabled: root.can-test; clicked => { root.act("test-connection"); } }
+                        RbSmall { icon: @image-url("icons/plug-zap.svg"); label: "Connexion rapide"; tint: #e3b341; enabled: root.connected; clicked => { root.act("quick"); } }
+                    }
+                    RbColumn {
+                        RbSmall { icon: @image-url("icons/folder-open.svg"); label: "Espaces de travail"; enabled: root.connected; clicked => { root.act("workspaces"); } }
+                    }
+                }
+                RGroup {
+                    title: "Ajouter";
+                    RbLarge { icon: @image-url("icons/plus.svg"); label: "Nouvelle entrée"; tint: #58a6ff; enabled: root.connected; clicked => { root.act("new"); } }
+                    RbColumn {
+                        RbSmall { icon: @image-url("icons/folder-plus.svg"); label: "Nouveau dossier"; tint: #e3b341; enabled: root.connected; clicked => { root.act("folder"); } }
+                        RbSmall { icon: @image-url("icons/monitor.svg"); label: "Entrée RDP"; tint: #3b8eea; enabled: root.connected; clicked => { root.act("new-rdp"); } }
+                        RbSmall { icon: @image-url("icons/square-terminal.svg"); label: "Entrée SSH"; tint: #3fb950; enabled: root.connected; clicked => { root.act("new-ssh"); } }
+                    }
+                }
+                RGroup {
+                    title: "Édition";
+                    RbLarge { icon: @image-url("icons/pencil.svg"); label: "Modifier"; enabled: root.can-edit; clicked => { root.act("edit"); } }
+                    RbColumn {
+                        RbSmall { icon: @image-url("icons/copy.svg"); label: "Dupliquer"; enabled: root.has-entry && root.can-edit; clicked => { root.act("dup"); } }
+                        RbSmall { icon: @image-url("icons/trash-2.svg"); label: "Supprimer"; tint: #f85149; enabled: root.can-edit; clicked => { root.act("del"); } }
+                        RbSmall { icon: @image-url("icons/star.svg"); label: root.is-favorite ? "Retirer des favoris" : "Ajouter aux favoris"; tint: #e3b341; enabled: root.has-entry && root.can-edit; clicked => { root.act("fav"); } }
+                    }
+                }
+                RGroup {
+                    title: "Commandes";
+                    RbLarge { icon: @image-url("icons/zap.svg"); label: "Commande SSH"; tint: #e3b341; enabled: root.connected; clicked => { root.act("cmd"); } }
+                }
+                RGroup {
+                    title: "Coffre";
+                    RbLarge { icon: @image-url("icons/key-round.svg"); label: "Identifiants"; tint: #d29922; enabled: root.connected; clicked => { root.act("creds"); } }
+                }
+                RGroup {
+                    title: "Importer";
+                    RbLarge { icon: @image-url("icons/file-up.svg"); label: "Importer depuis RDM"; tint: #58a6ff; enabled: root.connected; clicked => { root.act("import"); } }
+                }
+                RGroup {
+                    title: "Données";
+                    RbLarge { icon: @image-url("icons/activity.svg"); label: "Disponibilité"; tint: #3fb950; enabled: root.connected; clicked => { root.act("availability"); } }
+                    RbColumn {
+                        RbSmall { icon: @image-url("icons/refresh-cw.svg"); label: "Actualiser"; enabled: root.connected && !root.busy; clicked => { root.act("reload"); } }
+                    }
+                }
+            }
+            if root.rtab == 1: HorizontalLayout {
+                padding-left: 6px;
+                padding-top: 4px;
+                alignment: start;
+                RGroup {
+                    title: "Thème";
+                    RbLarge { icon: @image-url("icons/moon.svg"); label: "Sombre"; on: Theme.dark; clicked => { root.act("dark"); } }
+                    RbLarge { icon: @image-url("icons/sun.svg"); label: "Clair"; on: !Theme.dark; clicked => { root.act("light"); } }
+                }
+                RGroup {
+                    title: "Navigation";
+                    RbColumn {
+                        RbSmall { icon: @image-url("icons/chevrons-up-down.svg"); label: "Tout développer"; clicked => { root.act("expand"); } }
+                        RbSmall { icon: @image-url("icons/chevrons-down-up.svg"); label: "Tout réduire"; clicked => { root.act("collapse"); } }
+                        RbSmall { icon: @image-url("icons/layout-dashboard.svg"); label: "Tableau de bord"; clicked => { root.act("dash"); } }
+                    }
+                }
+            }
+            if root.rtab == 2: HorizontalLayout {
+                padding-left: 6px;
+                padding-top: 4px;
+                alignment: start;
+                RGroup {
+                    title: "Suivi";
+                    RbLarge { icon: @image-url("icons/history.svg"); label: "Journal d'activité"; tint: #58a6ff; enabled: root.server-mode; clicked => { root.act("audit"); } }
+                    RbLarge { icon: @image-url("icons/film.svg"); label: "Enregistrements"; tint: #58a6ff; enabled: root.server-mode; clicked => { root.act("recordings"); } }
+                }
+                RGroup {
+                    title: "Mobile";
+                    RbLarge { icon: @image-url("icons/smartphone.svg"); label: "Appareils"; tint: #3fb950; enabled: root.server-mode; clicked => { root.act("devices"); } }
+                }
+                RGroup {
+                    title: "Synchronisation";
+                    RbLarge { icon: @image-url("icons/refresh-cw.svg"); label: "Sources de synchro"; tint: #e57000; enabled: root.server-mode; clicked => { root.act("sources"); } }
+                }
+                RGroup {
+                    title: "Maintenance";
+                    RbLarge { icon: @image-url("icons/copy-x.svg"); label: "Doublons"; tint: #d29922; enabled: root.connected; clicked => { root.act("dups"); } }
+                    RbLarge { icon: @image-url("icons/hard-drive.svg"); label: "Sauvegarde"; tint: #58a6ff; enabled: root.connected; clicked => { root.act("backups"); } }
+                }
+                RGroup {
+                    title: "Aide";
+                    RbLarge { icon: @image-url("icons/info.svg"); label: "À propos"; clicked => { root.act("about"); } }
+                }
+            }
+            if root.rtab == 3: HorizontalLayout {
+                padding-left: 6px;
+                padding-top: 4px;
+                alignment: start;
+                RGroup {
+                    title: "Mises à jour";
+                    RbLarge { icon: @image-url("icons/download.svg"); label: "Rechercher des mises à jour"; tint: #3fb950; clicked => { root.check-updates(); } }
+                }
+                RGroup {
+                    title: "Aide";
+                    RbLarge { icon: @image-url("icons/info.svg"); label: "À propos"; clicked => { root.act("about"); } }
+                }
+            }
+            }
+                }
+            Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            // Navigation (.nav)
+            Rectangle {
+                width: 290px;
+                background: Theme.bg-panel;
+                VerticalLayout {
+                    Rectangle {
+                        height: 26px;
+                        Text { x: 10px; height: parent.height; text: "NAVIGATION"; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border-soft; }
+                    }
+                    HorizontalLayout {
+                        padding: 8px;
+                        padding-bottom: 2px;
+                        spacing: 4px;
+                        Ico { source: @image-url("icons/database.svg"); tint: #58a6ff; width: 14px; height: 14px; y: 9px; }
+                        ComboBox {
+                            horizontal-stretch: 1;
+                            model: root.source-names;
+                            current-index <=> root.source-index;
+                            enabled: !root.busy;
+                            selected => { root.source-selected(self.current-index); }
+                        }
+                        RbSmall { icon: @image-url("icons/plus.svg"); label: ""; width: 26px; height: 30px; tint: #58a6ff; accessible-label: "Ajouter une source"; clicked => { root.add-source(); } }
+                        RbSmall { icon: @image-url("icons/unplug.svg"); label: ""; width: 26px; height: 30px; enabled: root.source-index >= 0; accessible-label: "Retirer la source"; clicked => { root.remove-source(); } }
+                    }
+                    Text { text: root.user-label; x: 30px; font-size: 11px; color: Theme.muted; overflow: elide; }
+                    HorizontalLayout {
+                        padding: 8px;
+                        padding-top: 4px;
+                        spacing: 4px;
+                        LineEdit {
+                            placeholder-text: "Rechercher (nom, hôte)…";
+                            text <=> root.search;
+                            enabled: root.connected;
+                            edited(t) => { root.search-edited(t); }
+                        }
+                    }
+                    tree-keys := FocusScope {
+                        vertical-stretch: 1;
+                        key-pressed(event) => {
+                            if (event.text == Key.UpArrow) { root.tree-key("up"); return accept; }
+                            if (event.text == Key.DownArrow) { root.tree-key("down"); return accept; }
+                            if (event.text == Key.RightArrow) { root.tree-key("right"); return accept; }
+                            if (event.text == Key.LeftArrow) { root.tree-key("left"); return accept; }
+                            if (event.text == Key.Return) { root.tree-key("enter"); return accept; }
+                            if (event.text == Key.Delete) { root.tree-key("delete"); return accept; }
+                            if (event.text == Key.F2) { root.tree-key("edit"); return accept; }
+                            reject
+                        }
+                        tree-menu := ContextMenuArea {
+                        Menu {
+                            if root.has-entry: MenuItem { title: root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session"; activated => { root.act("open"); } }
+                            if root.can-test: MenuItem { title: "Tester la connexion"; activated => { root.act("test-connection"); } }
+                            if root.has-entry: MenuItem { title: "Modifier…"; activated => { root.act("edit"); } }
+                            if root.has-entry: MenuItem { title: "Dupliquer"; activated => { root.act("dup"); } }
+                            if root.has-entry: MenuItem { title: root.is-favorite ? "Retirer des favoris" : "Ajouter aux favoris"; activated => { root.act("fav"); } }
+                            if root.has-entry: MenuSeparator { }
+                            if root.has-folder: MenuItem { title: "Identifiants du dossier"; activated => { root.act("folder-creds"); } }
+                            if !root.has-entry: MenuItem { title: "Voir la disponibilité"; activated => { root.act("availability"); } }
+                            if !root.has-entry: MenuSeparator { }
+                            if root.ctx-ssh > 0: MenuItem {
+                                title: root.ctx-ssh > 1 ? "Exécuter une commande (" + root.ctx-ssh + " serveurs SSH)…" : "Exécuter une commande…";
+                                activated => { root.act("cmd"); }
+                            }
+                            if root.ctx-ssh > 0: MenuSeparator { }
+                            MenuItem { title: "Nouvelle entrée…"; activated => { root.act("new"); } }
+                            MenuItem { title: "Nouveau dossier…"; activated => { root.act("folder"); } }
+                            if root.has-folder: MenuItem { title: "Renommer…"; activated => { root.act("edit"); } }
+                            if root.can-edit: MenuSeparator { }
+                            if root.can-edit: MenuItem { title: "Supprimer"; activated => { root.act("del"); } }
+                        }
+                        // Right-click on the empty part of the tree: menu of the root.
+                        TouchArea {
+                            enabled: root.connected;
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                    tree-keys.focus();
+                                    root.selected = -1;
+                                    root.row-selected(-1);
+                                    tree-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                }
+                            }
+                        }
+                        ListView {
+                            for row[i] in root.rows: Rectangle {
+                                height: 24px;
+                                background: i == root.selected ? Theme.selection : ta.has-hover ? Theme.bg-hover : transparent;
+                                accessible-role: list-item;
+                                accessible-label: row.name;
+                                accessible-item-selected: i == root.selected;
+                                accessible-action-default => { root.selected = i; root.row-selected(i); }
+                                ta := TouchArea {
+                                    clicked => { tree-keys.focus(); root.selected = i; root.row-selected(i); }
+                                    double-clicked => { root.selected = i; root.row-activated(i); }
+                                    pointer-event(e) => {
+                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                            tree-keys.focus();
+                                            root.selected = i;
+                                            root.row-selected(i);
+                                            tree-menu.show({
+                                                x: self.absolute-position.x - tree-menu.absolute-position.x + self.mouse-x,
+                                                y: self.absolute-position.y - tree-menu.absolute-position.y + self.mouse-y,
+                                            });
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 6px + row.depth * 16px;
+                                    padding-right: 8px;
+                                    spacing: 6px;
+                                    Rectangle {
+                                        width: 14px;
+                                        if row.children: Ico {
+                                            y: 5px;
+                                            width: 14px;
+                                            height: 14px;
+                                            source: row.expanded ? @image-url("icons/chevron-down.svg") : @image-url("icons/chevron-right.svg");
+                                            tint: Theme.muted;
+                                        }
+                                        TouchArea {
+                                            enabled: row.children;
+                                            clicked => { root.row-toggled(i); }
+                                        }
+                                    }
+                                    KindIcon { kind: row.kind; y: 4px; }
+                                    Text { text: row.name; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                                    if row.favorite: Ico { source: @image-url("icons/star.svg"); tint: #e3b341; width: 12px; height: 12px; y: 6px; }
+                                    Text { text: row.detail; vertical-alignment: center; horizontal-alignment: right; font-size: 11px; overflow: elide; max-width: 120px; color: Theme.muted; }
+                                    if !row.folder && row.kind != "web" && row.kind != "pve": StatusDot { status: row.status; y: 8px; }
+                                }
+                            }
+                        }
+                        }
+                    }
+                }
+                Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border; }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                // Document tabs: dashboard + sessions
+                Rectangle {
+                    height: 32px;
+                    background: Theme.bg-panel;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        spacing: 2px;
+                        alignment: start;
+                        Rectangle {
+                            width: dash-lbl.preferred-width + 44px;
+                            background: root.active-tab < 0 ? Theme.bg : dash-ta.has-hover ? Theme.bg-hover : transparent;
+                            accessible-role: tab;
+                            accessible-label: "Tableau de bord";
+                            accessible-action-default => { root.active-tab = -1; root.tab-activated(-1); }
+                            dash-ta := TouchArea { clicked => { root.active-tab = -1; root.tab-activated(-1); } }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 6px;
+                                Ico { source: @image-url("icons/layout-dashboard.svg"); width: 14px; height: 14px; y: 9px; tint: #58a6ff; }
+                                dash-lbl := Text { text: "Tableau de bord"; vertical-alignment: center; color: Theme.text; }
+                            }
+                            Rectangle { y: parent.height - 2px; height: 2px; background: root.active-tab < 0 ? Theme.accent : transparent; }
+                        }
+                        for t[i] in root.tabs: Rectangle {
+                            width: min(240px, tab-lbl.preferred-width + 64px);
+                            background: root.active-tab == i ? Theme.bg : tab-ta.has-hover ? Theme.bg-hover : transparent;
+                            accessible-role: tab;
+                            accessible-label: t.title;
+                            accessible-action-default => { root.active-tab = i; root.tab-activated(i); }
+                            tab-ta := TouchArea {
+                                clicked => { root.active-tab = i; root.tab-activated(i); }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.middle && e.kind == PointerEventKind.up) { root.tab-closed(i); }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 4px;
+                                spacing: 6px;
+                                KindIcon { kind: t.kind; y: 8px; }
+                                Rectangle {
+                                    width: 7px;
+                                    StatusDot { status: t.state == "connected" ? 1 : t.state == "closed" ? 2 : 0; width: 7px; height: 7px; y: 13px; }
+                                }
+                                tab-lbl := Text { text: t.title; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                                Rectangle {
+                                    width: 22px;
+                                    border-radius: 3px;
+                                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
+                                    Ico { source: @image-url("icons/x.svg"); width: 13px; height: 13px; tint: Theme.muted; }
+                                    close-ta := TouchArea { clicked => { root.tab-closed(i); } }
+                                }
+                            }
+                            Rectangle { y: parent.height - 2px; height: 2px; background: root.active-tab == i ? Theme.accent : transparent; }
+                        }
+                    }
+                }
+            if root.active-tab >= 0: session-pane := Rectangle {
+                vertical-stretch: 1;
+                background: #0c0c0c;
+                init => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                changed width => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                changed height => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                changed absolute-position => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                if root.active-kind == "rdp": Text {
+                    text: "Session Bureau à distance";
+                    color: #808080;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                if root.active-kind == "ssh": term-fs := FocusScope {
+                    init => { self.focus(); root.term-size(self.width, self.height); }
+                    changed width => { root.term-size(self.width, self.height); }
+                    changed height => { root.term-size(self.width, self.height); }
+                    key-pressed(event) => {
+                        if (event.modifiers.control && event.modifiers.shift && (event.text == "V" || event.text == "v")) { root.term-paste(); return accept; }
+                        root.term-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                        accept
+                    }
+                    TouchArea {
+                        clicked => { term-fs.focus(); }
+                        pointer-event(e) => {
+                            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) { term-fs.focus(); root.term-paste(); }
+                        }
+                        scroll-event(e) => {
+                            root.term-scroll(e.delta-y > 0 ? 3 : -3);
+                            accept
+                        }
+                    }
+                    Image {
+                        x: 4px;
+                        y: 4px;
+                        source: root.term-image;
+                        width: self.source.width * 1px / root.scale;
+                        height: self.source.height * 1px / root.scale;
+                        image-rendering: pixelated;
+                    }
+                }
+                if root.active-kind == "pve": console-focus := FocusScope {
+                    init => { self.focus(); }
+                    key-pressed(e) => { root.console-key(e.text,true); accept }
+                    key-released(e) => { root.console-key(e.text,false); accept }
+                    Image { source: root.term-image; width: parent.width; height: parent.height - 34px; image-fit: fill; }
+                    console-mouse := TouchArea {
+                        height: parent.height - 34px;
+                        property <int> buttons: 0;
+                        moved => { root.console-pointer(self.mouse-x/1px,self.mouse-y/1px,self.width/1px,self.height/1px,self.buttons); }
+                        pointer-event(e) => {
+                            console-focus.focus();
+                            if e.kind == PointerEventKind.cancel { self.buttons=0; }
+                            if e.kind == PointerEventKind.down || e.kind == PointerEventKind.up {
+                                // Keep simultaneous mouse buttons pressed.
+                                if e.button == PointerEventButton.left { self.buttons += e.kind == PointerEventKind.down ? 1 : -1; }
+                                if e.button == PointerEventButton.middle { self.buttons += e.kind == PointerEventKind.down ? 2 : -2; }
+                                if e.button == PointerEventButton.right { self.buttons += e.kind == PointerEventKind.down ? 4 : -4; }
+                            }
+                            root.console-pointer(self.mouse-x/1px,self.mouse-y/1px,self.width/1px,self.height/1px,self.buttons);
+                        }
+                        scroll-event(e) => {
+                            root.console-pointer(self.mouse-x/1px,self.mouse-y/1px,self.width/1px,self.height/1px,self.buttons + (e.delta-y > 0 ? 8 : 16));
+                            root.console-pointer(self.mouse-x/1px,self.mouse-y/1px,self.width/1px,self.height/1px,self.buttons);
+                            accept
+                        }
+                    }
+                }
+                if root.session-banner != "": Rectangle {
+                    x: 0;
+                    y: parent.height - 34px;
+                    height: 34px;
+                    background: #1f2328e0;
+                    Text { text: root.session-banner; color: #f0f0f0; vertical-alignment: center; horizontal-alignment: center; }
+                }
+            }
+            // Dashboard of the selected item
+            if root.active-tab < 0: Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg;
+                if root.detail-title == "": VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
+                    HorizontalLayout { alignment: center; Ico { source: @image-url("icons/layout-dashboard.svg"); width: 44px; height: 44px; tint: Theme.muted.with-alpha(0.5); } }
+                    Text {
+                        text: root.connected ? "Sélectionnez une entrée ou un dossier." : "Choisissez ou ajoutez une source de données dans le panneau Navigation.";
+                        horizontal-alignment: center;
+                        color: Theme.muted;
+                    }
+                }
+                if root.detail-title != "": VerticalLayout {
+                    padding: 22px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 14px;
+                        KindIcon { kind: root.detail-kind; width: 36px; height: 36px; }
+                        VerticalLayout {
+                            alignment: center;
+                            Text { text: root.detail-title; font-size: 22px; font-weight: 600; overflow: elide; color: Theme.text; }
+                            Text { text: root.detail-subtitle; color: Theme.muted; overflow: elide; }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        if root.can-open: Button { text: root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session"; primary: true; clicked => { root.act("open"); } }
+                        if root.can-test: Button { text: "Tester la connexion"; clicked => { root.act("test-connection"); } }
+                        if root.can-edit: Button { text: "Modifier"; clicked => { root.act("edit"); } }
+                        if root.has-folder: Button { text: "Identifiants du dossier"; clicked => { root.act("folder-creds"); } }
+                        if root.has-folder: Button { text: "Disponibilité"; clicked => { root.act("availability"); } }
+                        if root.can-open-external: Button { text: "Ouvrir dans mstsc"; clicked => { root.open-external(); } }
+
+                    }
+                    Rectangle {
+                        background: Theme.bg-elev;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Theme.border-soft;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 9px;
+                            for f in root.detail-fields: HorizontalLayout {
+                                spacing: 12px;
+                                Text { text: f.label; width: 170px; color: Theme.muted; }
+                                Text { text: f.value; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                            }
+                        }
+                    }
+                    notes-sv := ScrollView {
+                        vertical-stretch: 1;
+                        content-width: self.visible-width;
+                        content-height: notes-lay.preferred-height;
+                        notes-lay := VerticalLayout {
+                            width: notes-sv.visible-width - 6px;
+                            spacing: 8px;
+                            alignment: start;
+                            if root.has-entry: HorizontalLayout {
+                                spacing: 10px;
+                                Text { text: "Notes"; font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                RbSmall { icon: @image-url("icons/pencil.svg"); label: "Modifier les notes"; enabled: root.can-edit; clicked => { root.act("notes-edit"); } }
+                            }
+                            if root.has-entry && root.note-blocks.length == 0: Text { text: "Aucune note."; color: Theme.muted; font-size: 12px; }
+                            for b in root.note-blocks: VerticalLayout {
+                                if b.kind == "h": StyledText {
+                                    text: b.text;
+                                    default-color: Theme.text;
+                                    link-color: #58a6ff;
+                                    default-font-size: b.depth == 1 ? 20px : b.depth == 2 ? 17px : 15px;
+                                    link-clicked(l) => { root.open-link(l); }
+                                }
+                                if b.kind == "p": StyledText {
+                                    text: b.text;
+                                    default-color: Theme.text;
+                                    link-color: #58a6ff;
+                                    link-clicked(l) => { root.open-link(l); }
+                                }
+                                if b.kind == "li": HorizontalLayout {
+                                    padding-left: 4px + b.depth * 18px;
+                                    spacing: 6px;
+                                    Text { text: b.marker; color: Theme.muted; min-width: 16px; }
+                                    StyledText {
+                                        horizontal-stretch: 1;
+                                        text: b.text;
+                                        default-color: Theme.text;
+                                        link-color: #58a6ff;
+                                        link-clicked(l) => { root.open-link(l); }
+                                    }
+                                }
+                                if b.kind == "quote": HorizontalLayout {
+                                    spacing: 10px;
+                                    Rectangle { width: 3px; background: Theme.border; }
+                                    StyledText {
+                                        horizontal-stretch: 1;
+                                        text: b.text;
+                                        default-color: Theme.muted;
+                                        link-color: #58a6ff;
+                                        link-clicked(l) => { root.open-link(l); }
+                                    }
+                                }
+                                if b.kind == "code" || b.kind == "table": Rectangle {
+                                    background: Theme.bg-panel;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: Theme.border-soft;
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        Text { text: b.plain; font-family: "Consolas"; font-size: 12px; color: Theme.text; wrap: word-wrap; }
+                                    }
+                                }
+                                if b.kind == "hr": Rectangle { height: 1px; background: Theme.border; }
+                            }
+                            if root.has-entry: HorizontalLayout {
+                                padding-top: 8px;
+                                spacing: 10px;
+                                Text { text: "Pièces jointes"; font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                RbSmall { icon: @image-url("icons/plus.svg"); label: "Ajouter…"; tint: #58a6ff; enabled: root.can-edit; clicked => { root.act("att-add"); } }
+                                RbSmall { icon: @image-url("icons/download.svg"); label: "Télécharger…"; enabled: root.att-selected >= 0; clicked => { root.act("att-get"); } }
+                                RbSmall { icon: @image-url("icons/trash-2.svg"); label: "Supprimer"; tint: #f85149; enabled: root.att-selected >= 0 && root.can-edit; clicked => { root.act("att-del"); } }
+                            }
+                            if root.has-entry && root.att-rows.length == 0: Text { text: root.att-info; color: Theme.muted; font-size: 12px; }
+                            for a[i] in root.att-rows: Rectangle {
+                                height: 26px;
+                                background: i == root.att-selected ? Theme.selection : att-ta.has-hover ? Theme.bg-hover : transparent;
+                                accessible-role: list-item;
+                                accessible-label: a.name;
+                                accessible-item-selected: i == root.att-selected;
+                                accessible-action-default => { root.att-selected = i; }
+                                att-ta := TouchArea {
+                                    clicked => { root.att-selected = i; }
+                                    double-clicked => { root.att-selected = i; root.act("att-get"); }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 10px;
+                                    Ico { source: @image-url("icons/paperclip.svg"); tint: Theme.muted; y: 6px; }
+                                    Text { text: a.name; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                                    Text { text: a.detail; vertical-alignment: center; color: Theme.muted; font-size: 12px; }
+                                    Text { text: a.extra; vertical-alignment: center; color: Theme.muted; font-size: 12px; width: 130px; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            }
+        }
+
+        // Status bar (.statusbar)
+        Rectangle {
+            height: 24px;
+            background: Theme.accent;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 10px;
+                Text { text: root.user-label == "" ? "Non connecté" : "Connecté : " + root.user-label; color: white; font-size: 12px; vertical-alignment: center; }
+                SbSep { y: 5px; }
+                Text { text: root.status-counts; color: white; font-size: 12px; vertical-alignment: center; }
+                SbSep { y: 5px; }
+                Text { text: root.tabs.length + " session(s) ouverte(s)"; color: white; font-size: 12px; vertical-alignment: center; }
+                SbSep { y: 5px; }
+                Text { text: (root.busy ? "⏳ " : "") + root.status; color: #ffffffcc; font-size: 12px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                if root.status-path != "": Text { text: root.status-path; color: #ffffffcc; font-size: 12px; vertical-alignment: center; overflow: elide; max-width: 260px; }
+                SbSep { y: 5px; }
+                Text { text: "Relay Desktop " + root.version; color: white; font-size: 12px; vertical-alignment: center; }
+            }
+        }
+    }
+
+    if root.dialog == "notes": Dialog {
+        title: "Notes de l'entrée";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 760px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: "Markdown : # titre, **gras**, *italique*, `code`, listes - ou 1., [lien](https://…), blocs ``` et tableaux."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        TextEdit { text <=> root.notes-text; wrap: word-wrap; height: 360px; font-size: 13px; }
+    }
+
+    if root.dialog == "cmd": Dialog {
+        title: "Exécuter une commande SSH";
+        error: root.dialog-error;
+        busy: root.cmd-running;
+        ok-text: "Exécuter";
+        cancel-text: "Fermer";
+        card-width: 1000px;
+        ok => { root.act("cmd-run"); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: root.cmd-targets-text; color: Theme.muted; font-size: 12px; overflow: elide; }
+        HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                horizontal-stretch: 1;
+                model: root.cmd-saved-names;
+                current-index <=> root.cmd-saved-index;
+                selected => { root.act("cmd-pick"); }
+            }
+            LineEdit { text <=> root.cmd-name; placeholder-text: "Nom pour l'enregistrer"; horizontal-stretch: 1; }
+            Button { text: "Enregistrer"; enabled: root.cmd-text != "" && root.cmd-name != ""; clicked => { root.act("cmd-save"); } }
+            Button { text: "Supprimer"; enabled: root.cmd-saved-index > 0; clicked => { root.act("cmd-forget"); } }
+        }
+        TextEdit { text <=> root.cmd-text; height: 70px; font-size: 13px; wrap: word-wrap; }
+        HorizontalLayout {
+            spacing: 12px;
+            CheckBox { text: "sudo (mot de passe de l'identifiant)"; checked <=> root.cmd-sudo; }
+            Text { text: "Délai par serveur (s)"; vertical-alignment: center; color: Theme.muted; }
+            LineEdit { text <=> root.cmd-timeout; width: 70px; input-type: number; }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Arrêter"; enabled: root.cmd-running; clicked => { root.act("cmd-stop"); } }
+            Button { text: "Relancer les échecs"; enabled: !root.cmd-running && root.cmd-summary != ""; clicked => { root.act("cmd-retry"); } }
+        }
+        Text { text: root.cmd-summary; color: Theme.text; font-size: 12px; }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                width: 430px;
+                height: 300px;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: 4px;
+                ListView {
+                    for r[i] in root.cmd-rows: Rectangle {
+                        height: 26px;
+                        background: i == root.cmd-selected ? Theme.selection : cmd-ta.has-hover ? Theme.bg-hover : transparent;
+                        accessible-role: list-item;
+                        accessible-label: r.name + " " + r.extra;
+                        accessible-item-selected: i == root.cmd-selected;
+                        accessible-action-default => { root.cmd-selected = i; root.act("cmd-show"); }
+                        cmd-ta := TouchArea { clicked => { root.cmd-selected = i; root.act("cmd-show"); } }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            StatusDot { status: r.status; y: 9px; }
+                            Text { text: r.name; width: 150px; vertical-alignment: center; overflow: elide; color: Theme.text; }
+                            Text { text: r.detail; width: 120px; vertical-alignment: center; overflow: elide; color: Theme.muted; font-size: 12px; }
+                            Text { text: r.extra; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: r.status == 2 ? #f85149 : Theme.muted; font-size: 12px; }
+                        }
+                    }
+                }
+            }
+            TextEdit { text: root.cmd-output; read-only: true; height: 300px; horizontal-stretch: 1; font-size: 12px; wrap: word-wrap; }
+        }
+    }
+
+    if root.dialog == "backup": Dialog {
+        title: "Sauvegarde et restauration";
+        error: root.dialog-error;
+        busy: root.busy;
+        show-ok: false;
+        cancel-text: "Fermer";
+        card-width: 560px;
+        cancel => { root.cancel-dialog(); }
+        Text {
+            text: root.server-mode
+                ? "Archive chiffrée de tout le serveur Relay (entrées, identifiants, réglages, enregistrements), protégée par un mot de passe de sauvegarde."
+                : "Copie chiffrée du fichier du coffre local, protégée par un mot de passe de sauvegarde. Le mot de passe maître reste celui du coffre d'origine.";
+            wrap: word-wrap;
+            color: Theme.muted;
+            font-size: 12px;
+        }
+        Text { text: "Exporter"; font-weight: 600; color: Theme.text; }
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit { text <=> root.bk-password; input-type: password; placeholder-text: "Mot de passe de sauvegarde"; }
+            LineEdit { text <=> root.bk-password2; input-type: password; placeholder-text: "Confirmation"; }
+            Button { text: "Exporter…"; primary: true; enabled: !root.busy && root.bk-password != ""; clicked => { root.act("bk-export"); } }
+        }
+        Text { text: "Restaurer"; font-weight: 600; color: Theme.text; }
+        Text {
+            text: root.server-mode
+                ? "Remplace tout le contenu du serveur par celui de l'archive. Fermez d'abord les sessions."
+                : "Déchiffre la copie dans un nouveau fichier, à ajouter ensuite comme source.";
+            wrap: word-wrap;
+            color: Theme.muted;
+            font-size: 12px;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit { text <=> root.bk-restore-password; input-type: password; placeholder-text: "Mot de passe de la sauvegarde"; }
+            Button { text: "Restaurer…"; enabled: !root.busy && root.bk-restore-password != ""; clicked => { root.act("bk-restore"); } }
+        }
+    }
+
+    if root.dialog == "admin": Dialog {
+        title: root.adm-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        show-ok: false;
+        cancel-text: "Fermer";
+        card-width: 900px;
+        cancel => { root.cancel-dialog(); }
+        if root.adm-hint != "": Text { text: root.adm-hint; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        Rectangle {
+            height: 320px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 4px;
+            ListView {
+                for r[i] in root.adm-rows: Rectangle {
+                    height: 26px;
+                    background: i == root.adm-selected ? Theme.selection : adm-ta.has-hover ? Theme.bg-hover : transparent;
+                    accessible-role: list-item;
+                    accessible-label: r.name;
+                    accessible-item-selected: i == root.adm-selected;
+                    accessible-action-default => { root.adm-selected = i; root.act("adm-select"); }
+                    adm-ta := TouchArea { clicked => { root.adm-selected = i; root.act("adm-select"); } }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        StatusDot { status: r.status; y: 9px; }
+                        Text { text: r.name; width: 280px; vertical-alignment: center; overflow: elide; color: Theme.text; }
+                        Text { text: r.detail; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; }
+                        Text { text: r.extra; width: 230px; vertical-alignment: center; overflow: elide; color: r.status == 2 ? #f85149 : Theme.muted; font-size: 12px; }
+                    }
+                }
+            }
+        }
+        if root.adm-detail != "": Text { text: root.adm-detail; color: Theme.text; wrap: word-wrap; font-size: 12px; }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            for a[i] in root.adm-actions: Button { text: a; enabled: !root.busy; clicked => { root.act("adm-" + i); } }
+        }
+    }
+
+    if root.dialog == "import": Dialog {
+        title: "Importer depuis Remote Desktop Manager";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Importer";
+        card-width: 900px;
+        ok => { root.act("imp-apply"); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: "Exportez depuis RDM (Fichier → Exporter → Exporter tout au format .rdm), puis choisissez le fichier. Les mots de passe chiffrés par RDM ne sont pas relisibles et devront être ressaisis."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit { text <=> root.imp-path; placeholder-text: "Fichier .rdm"; horizontal-stretch: 1; }
+            Button { text: "Parcourir…"; clicked => { root.act("imp-browse"); } }
+            Button { text: "Analyser"; enabled: root.imp-path != "" && !root.busy; clicked => { root.act("imp-preview"); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            FormRow { label: "Dossier racine créé"; LineEdit { text <=> root.imp-root; } }
+            FormRow { label: "Identifiant par défaut (SSH)"; ComboBox { model: root.imp-cred-names; current-index <=> root.imp-ssh; } }
+            FormRow { label: "Identifiant par défaut (RDP)"; ComboBox { model: root.imp-cred-names; current-index <=> root.imp-rdp; } }
+        }
+        if root.imp-summary != "": Text { text: root.imp-summary; color: Theme.text; wrap: word-wrap; font-size: 12px; }
+        Rectangle {
+            height: 260px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 4px;
+            ListView {
+                for r in root.imp-rows: HorizontalLayout {
+                    height: 24px;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 10px;
+                    StatusDot { status: r.status; y: 8px; }
+                    Text { text: r.name; width: 240px; vertical-alignment: center; overflow: elide; color: Theme.text; font-size: 12px; }
+                    Text { text: r.detail; width: 260px; vertical-alignment: center; overflow: elide; color: Theme.muted; font-size: 12px; }
+                    Text { text: r.extra; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: r.status == 2 ? #d29922 : Theme.muted; font-size: 12px; }
+                }
+            }
+        }
+    }
+
+    if root.dialog == "quick": Dialog {
+        title: "Connexion rapide";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Connecter";
+        card-width: 480px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Protocole"; horizontal-stretch: 1; ComboBox { model: ["RDP", "SSH", "Web"]; current-index <=> root.q-kind; } }
+            FormRow { label: "Hôte ou URL"; horizontal-stretch: 3; LineEdit { text <=> root.q-host; placeholder-text: "serveur.lan, 10.0.0.5 ou https://…"; } }
+            FormRow { label: "Port"; horizontal-stretch: 1; LineEdit { text <=> root.q-port; placeholder-text: "défaut"; } }
+        }
+        FormRow { label: "Identifiant du coffre"; ComboBox { model: root.credential-names; current-index <=> root.q-cred; } }
+        if root.q-cred == 0: HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Utilisateur"; horizontal-stretch: 1; LineEdit { text <=> root.q-username; } }
+            FormRow { label: "Mot de passe"; horizontal-stretch: 1; LineEdit { text <=> root.q-password; input-type: password; accepted => { root.submit-dialog(); } } }
+        }
+    }
+
+    if root.dialog == "creds": Dialog {
+        title: "Identifiants du coffre";
+        error: root.dialog-error;
+        busy: root.busy;
+        show-ok: false;
+        cancel-text: "Fermer";
+        card-width: 760px;
+        cancel => { root.cancel-dialog(); }
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "Nouveau"; clicked => { root.act("cred-new"); } }
+            Button { text: "Modifier"; enabled: root.cred-selected >= 0; clicked => { root.act("cred-edit"); } }
+            Button { text: "Copier le mot de passe"; enabled: root.cred-selected >= 0; clicked => { root.act("cred-copy"); } }
+            Button { text: "Code TOTP"; enabled: root.cred-selected >= 0; clicked => { root.act("cred-totp"); } }
+            Button { text: "Supprimer"; enabled: root.cred-selected >= 0; clicked => { root.act("cred-del"); } }
+        }
+        Rectangle {
+            height: 300px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 4px;
+            ListView {
+                for c[i] in root.cred-rows: Rectangle {
+                    height: 30px;
+                    background: i == root.cred-selected ? Theme.selection : cta.has-hover ? Theme.bg-hover : transparent;
+                    accessible-role: list-item;
+                    accessible-label: c.name;
+                    accessible-action-default => { root.cred-selected = i; root.cred-selected-changed(i); }
+                    cta := TouchArea { clicked => { root.cred-selected = i; root.cred-selected-changed(i); } }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        KindIcon { kind: "credential"; y: 7px; }
+                        Text { text: c.name; width: 220px; vertical-alignment: center; overflow: elide; color: Theme.text; }
+                        Text { text: c.username; width: 200px; vertical-alignment: center; overflow: elide; color: Theme.muted; }
+                        Text { text: c.detail; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.muted; font-size: 11px; }
+                    }
+                }
+            }
+        }
+        if root.cred-info != "": Text { text: root.cred-info; color: Theme.text; wrap: word-wrap; }
+    }
+
+    if root.dialog == "folder-creds": Dialog {
+        title: "Identifiants du dossier";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 480px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: "Les entrées du dossier et de ses sous-dossiers utilisent ces comptes par défaut. Un identifiant choisi sur une entrée reste prioritaire."; wrap: word-wrap; color: Theme.muted; font-size: 12px; }
+        FormRow { label: "RDP"; ComboBox { model: root.credential-names; current-index <=> root.fc-rdp; } }
+        FormRow { label: "SSH"; ComboBox { model: root.credential-names; current-index <=> root.fc-ssh; } }
+        FormRow { label: "VNC"; ComboBox { model: root.credential-names; current-index <=> root.fc-vnc; } }
+        FormRow { label: "Web"; ComboBox { model: root.credential-names; current-index <=> root.fc-web; } }
+    }
+
+    if root.dialog == "test": Dialog {
+        title: "Tester la connexion";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Relancer";
+        cancel-text: "Fermer";
+        card-width: 480px;
+        ok => { root.act("test-connection"); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: root.busy ? "Test en cours…" : root.test-text; wrap: word-wrap; color: Theme.text; }
+    }
+
+    if root.dialog == "availability": Dialog {
+        title: "Disponibilité";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Retester";
+        cancel-text: "Fermer";
+        card-width: 980px;
+        ok => { root.act("availability-run"); }
+        cancel => { root.cancel-dialog(); }
+        CheckBox { text: "Afficher uniquement les ports inaccessibles"; checked <=> root.avail-failed-only; toggled => { root.act("availability-filter"); } }
+        Rectangle {
+            height: 380px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 4px;
+            ListView {
+                for a in root.avail-rows: HorizontalLayout {
+                    height: 26px;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 10px;
+                    StatusDot { status: a.status; y: 9px; }
+                    KindIcon { kind: a.kind; y: 5px; }
+                    Text { text: a.name; width: 200px; vertical-alignment: center; overflow: elide; color: Theme.text; }
+                    Text { text: a.endpoint; width: 200px; vertical-alignment: center; overflow: elide; color: Theme.muted; }
+                    Text { text: a.path; width: 200px; vertical-alignment: center; overflow: elide; color: Theme.muted; font-size: 11px; }
+                    Text { text: a.detail; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: a.status == 2 ? #f85149 : Theme.muted; font-size: 12px; }
+                }
+            }
+        }
+    }
+
+    if root.dialog == "audit": Dialog {
+        title: "Journal d'activité";
+        error: root.dialog-error;
+        busy: root.busy;
+        show-ok: false;
+        cancel-text: "Fermer";
+        card-width: 980px;
+        cancel => { root.cancel-dialog(); }
+        Rectangle {
+            height: 420px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 4px;
+            ListView {
+                for a in root.audit-rows: HorizontalLayout {
+                    height: 24px;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 10px;
+                    Text { text: a.at; width: 140px; vertical-alignment: center; color: Theme.muted; font-size: 12px; }
+                    Text { text: a.user; width: 180px; vertical-alignment: center; overflow: elide; color: Theme.text; font-size: 12px; }
+                    Text { text: a.action; width: 150px; vertical-alignment: center; overflow: elide; color: #58a6ff; font-size: 12px; }
+                    Text { text: a.target; width: 200px; vertical-alignment: center; overflow: elide; color: Theme.text; font-size: 12px; }
+                    Text { text: a.detail; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; }
+                }
+            }
+        }
+    }
+
+    if root.dialog == "workspaces": Dialog {
+        title: "Espaces de travail";
+        error: root.dialog-error;
+        busy: root.busy;
+        show-ok: false;
+        cancel-text: "Fermer";
+        card-width: 600px;
+        cancel => { root.cancel-dialog(); }
+        Text { text: "Un espace de travail rouvre en un clic un groupe de sessions."; color: Theme.muted; font-size: 12px; }
+        Rectangle {
+            height: 220px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 4px;
+            ListView {
+                for w[i] in root.ws-rows: Rectangle {
+                    height: 30px;
+                    background: i == root.ws-selected ? Theme.selection : wta.has-hover ? Theme.bg-hover : transparent;
+                    accessible-role: list-item;
+                    accessible-label: w.name;
+                    accessible-action-default => { root.ws-selected = i; }
+                    wta := TouchArea {
+                        clicked => { root.ws-selected = i; }
+                        double-clicked => { root.ws-selected = i; root.act("ws-open"); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        spacing: 10px;
+                        Ico { source: @image-url("icons/folder-open.svg"); tint: #e3b341; y: 7px; }
+                        Text { text: w.name; vertical-alignment: center; horizontal-stretch: 1; color: Theme.text; }
+                        Text { text: w.detail; vertical-alignment: center; color: Theme.muted; font-size: 12px; }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "Ouvrir"; primary: true; enabled: root.ws-selected >= 0; clicked => { root.act("ws-open"); } }
+            Button { text: "Supprimer"; enabled: root.ws-selected >= 0; clicked => { root.act("ws-del"); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit { text <=> root.ws-name; placeholder-text: "Nom du nouvel espace"; horizontal-stretch: 1; }
+            Button { text: "Enregistrer les sessions ouvertes"; enabled: root.tabs.length > 0; clicked => { root.act("ws-save"); } }
+        }
+    }
+
+    if root.dialog == "about": Dialog {
+        title: "À propos de Relay Desktop";
+        show-ok: false;
+        cancel-text: "Fermer";
+        card-width: 460px;
+        cancel => { root.cancel-dialog(); }
+        HorizontalLayout {
+            spacing: 14px;
+            Image { source: @image-url("icon.png"); width: 56px; height: 56px; }
+            VerticalLayout {
+                alignment: center;
+                Text { text: "Relay Desktop " + root.version; font-size: 16px; font-weight: 600; color: Theme.text; }
+                Text { text: "Gestionnaire de connexions à distance"; color: Theme.muted; }
+            }
+        }
+        Text { text: "Client Windows natif de Relay (Rust, Slint). Licence Apache 2.0. Icônes Lucide (licence ISC)."; wrap: word-wrap; color: Theme.text; }
+    }
+
+    if root.dialog == "source": Dialog {
+        title: "Ajouter une source de données";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Ajouter";
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        FormRow {
+            label: "Type";
+            ComboBox { model: ["Serveur Relay", "Base locale (sans serveur)"]; current-index <=> root.src-type; }
+        }
+        FormRow {
+            label: "Nom affiché";
+            LineEdit { text <=> root.src-name; placeholder-text: root.src-type == 0 ? "Relay maison" : "Mes serveurs"; }
+        }
+        if root.src-type == 0: FormRow {
+            label: "Serveur ou lien d'appairage relay://pair?…";
+            LineEdit { text <=> root.src-url; placeholder-text: "https://relay.example.com"; }
+        }
+        if root.src-type == 0: FormRow {
+            label: "Jeton d'appareil (Relay web → Administration → Appareils)";
+            LineEdit { text <=> root.src-token; input-type: password; placeholder-text: "rlt_…"; }
+        }
+        if root.src-type == 1: CheckBox { text: "Créer une nouvelle base"; checked <=> root.src-create; }
+        if root.src-type == 1: FormRow {
+            label: "Fichier de la base";
+            HorizontalLayout {
+                spacing: 6px;
+                LineEdit { text <=> root.src-path; horizontal-stretch: 1; }
+                Button { text: "Parcourir…"; clicked => { root.browse-path(); } }
+            }
+        }
+        if root.src-type == 1: FormRow {
+            label: "Mot de passe maître";
+            LineEdit { text <=> root.src-password; input-type: password; }
+        }
+        if root.src-type == 1 && root.src-create: FormRow {
+            label: "Confirmation";
+            LineEdit { text <=> root.src-password2; input-type: password; }
+        }
+        if root.src-type == 1 && root.src-create: Text {
+            text: "Le mot de passe maître chiffre les identifiants. Il ne peut pas être récupéré s'il est perdu.";
+            wrap: word-wrap;
+            font-size: 11px;
+            color: Theme.muted;
+        }
+    }
+
+    if root.dialog == "unlock": Dialog {
+        title: "Déverrouiller « " + root.unlock-name + " »";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Déverrouiller";
+        card-width: 420px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        FormRow {
+            label: "Mot de passe maître";
+            pw := LineEdit {
+                text <=> root.unlock-password;
+                input-type: password;
+                accepted => { root.submit-dialog(); }
+            }
+        }
+    }
+
+    if root.dialog == "entry": Dialog {
+        title: root.e-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 560px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Nom"; horizontal-stretch: 2; LineEdit { text <=> root.e-name; } }
+            FormRow { label: "Protocole"; horizontal-stretch: 1; ComboBox { model: root.kind-names; current-index <=> root.e-kind; } }
+        }
+        if root.e-kind != 3: HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Hôte"; horizontal-stretch: 3; LineEdit { text <=> root.e-host; placeholder-text: "serveur.lan ou 10.0.0.5"; } }
+            FormRow { label: "Port"; horizontal-stretch: 1; LineEdit { text <=> root.e-port; input-type: number; } }
+        }
+        if root.e-kind == 3: FormRow { label: "URL"; LineEdit { text <=> root.e-url; placeholder-text: "https://…"; } }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Utilisateur (si pas d'identifiant)"; horizontal-stretch: 1; LineEdit { text <=> root.e-username; } }
+            FormRow { label: "Identifiant du coffre"; horizontal-stretch: 1; ComboBox { model: root.credential-names; current-index <=> root.e-cred; } }
+        }
+        FormRow { label: "Dossier"; ComboBox { model: root.folder-names; current-index <=> root.e-folder; } }
+        FormRow { label: "Notes"; TextEdit { text <=> root.e-notes; height: 90px; wrap: word-wrap; } }
+    }
+
+    if root.dialog == "folder": Dialog {
+        title: root.f-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 440px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        FormRow { label: "Nom"; LineEdit { text <=> root.f-name; accepted => { root.submit-dialog(); } } }
+        FormRow { label: "Dossier parent"; ComboBox { model: root.folder-names; current-index <=> root.f-parent; } }
+    }
+
+    if root.dialog == "credential": Dialog {
+        title: root.c-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 480px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        FormRow { label: "Nom"; LineEdit { text <=> root.c-name; placeholder-text: "Admin domaine"; } }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Utilisateur"; horizontal-stretch: 1; LineEdit { text <=> root.c-username; } }
+            FormRow { label: "Domaine"; horizontal-stretch: 1; LineEdit { text <=> root.c-domain; } }
+        }
+        FormRow { label: "Mot de passe (laisser vide pour ne pas le modifier)"; LineEdit { text <=> root.c-password; input-type: password; } }
+        FormRow { label: "Secret TOTP (base32 ou lien otpauth://, facultatif)"; LineEdit { text <=> root.c-totp; input-type: password; } }
+        FormRow { label: "Notes"; TextEdit { text <=> root.c-notes; height: 70px; wrap: word-wrap; } }
+    }
+
+    if root.dialog == "update": Dialog {
+        title: "Mises à jour de Relay";
+        error: root.upd-state == "error" ? root.upd-message : "";
+        busy: root.upd-state == "checking" || root.upd-state == "downloading";
+        ok-text: "Mettre à jour";
+        show-ok: root.upd-state == "available" || root.upd-state == "downloading";
+        cancel-text: root.upd-state == "available" ? "Plus tard" : "Fermer";
+        card-width: 520px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "Version installée"; width: 150px; color: Theme.muted; }
+            Text { text: root.upd-current; color: Theme.text; }
+        }
+        if root.upd-latest != "": HorizontalLayout {
+            spacing: 12px;
+            Text { text: "Nouvelle version"; width: 150px; color: Theme.muted; }
+            Text { text: root.upd-latest; font-weight: 600; color: Theme.text; }
+        }
+        if root.upd-state == "checking": Text { text: "Recherche de mises à jour…"; color: Theme.text; }
+        if root.upd-state == "uptodate": Text { text: "Relay est à jour."; color: Theme.text; }
+        if root.upd-state == "downloading": Text { text: root.upd-message; color: Theme.text; }
+        if root.upd-notes != "" && (root.upd-state == "available" || root.upd-state == "downloading"): TextEdit {
+            text: root.upd-notes;
+            read-only: true;
+            wrap: word-wrap;
+            height: 140px;
+        }
+        if root.upd-state == "available": Text {
+            text: "L'installeur s'ouvrira (droits administrateur demandés), puis Relay redémarrera. Les sessions ouvertes seront fermées.";
+            wrap: word-wrap;
+            font-size: 11px;
+            color: Theme.muted;
+        }
+        CheckBox {
+            text: "Rechercher les mises à jour au démarrage";
+            checked <=> root.upd-auto;
+            toggled => { root.update-auto-toggled(self.checked); }
+        }
+    }
+
+    if root.dialog == "confirm": Dialog {
+        title: "Confirmer";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Supprimer";
+        card-width: 420px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: root.confirm-text; wrap: word-wrap; }
+    }
+}

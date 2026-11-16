@@ -1,0 +1,62 @@
+<?xml version="1.0"?>
+<ArrayOfConnection>
+  <Connection>
+    <ConnectionType>Group</ConnectionType>
+    <Group>LINUX LXC</Group>
+    <ID>11111111-0000-0000-0000-000000000001</ID>
+    <Name>LINUX LXC</Name>
+  </Connection>
+  <Connection>
+    <ConnectionType>Credential</ConnectionType>
+    <ID>CCCCCCCC-0000-0000-0000-000000000001</ID>
+    <Name>Administrator OverNite Industries</Name>
+    <Credentials>
+      <UserName>Administrator</UserName>
+      <Domain>OVERNITE</Domain>
+      <SafePassword>QkFTRTY0RU5DUllQVEVE</SafePassword>
+    </Credentials>
+  </Connection>
+  <Connection>
+    <ConnectionType>SSHShell</ConnectionType>
+    <Group>LINUX LXC</Group>
+    <ID>22222222-0000-0000-0000-000000000001</ID>
+    <Name>srv-lab-ansible</Name>
+    <Terminal>
+      <Host>10.20.0.61</Host>
+      <HostPort>2222</HostPort>
+      <Username>root</Username>
+      <SafePassword>xxxx</SafePassword>
+    </Terminal>
+    <MetaInformation><Host>ne-pas-prendre</Host></MetaInformation>
+  </Connection>
+  <Connection>
+    <ConnectionType>RDPConfigured</ConnectionType>
+    <Group>WINDOWS</Group>
+    <ID>33333333-0000-0000-0000-000000000001</ID>
+    <Name>srv-lab-dc1</Name>
+    <Url>10.20.0.20:3390</Url>
+    <CredentialConnectionID>cccccccc-0000-0000-0000-000000000001</CredentialConnectionID>
+    <Description>Contrôleur de domaine</Description>
+  </Connection>
+  <Connection>
+    <ConnectionType>RDPConfigured</ConnectionType>
+    <Group>WINDOWS\Sous-dossier</Group>
+    <Name>srv-lab-apps</Name>
+    <Url>srv-lab-apps.lab</Url>
+    <CredentialConnectionID>99999999-0000-0000-0000-000000000000</CredentialConnectionID>
+  </Connection>
+  <Connection>
+    <ConnectionType>WebBrowser</ConnectionType>
+    <Group>RESEAU</Group>
+    <Name>Omada</Name>
+    <WebBrowserUrl>10.20.0.249:8043</WebBrowserUrl>
+  </Connection>
+  <Connection>
+    <ConnectionType>TeamViewer</ConnectionType>
+    <Name>Maman</Name>
+  </Connection>
+  <Connection>
+    <ConnectionType>SSHShell</ConnectionType>
+    <Name>Sans hôte</Name>
+  </Connection>
+</ArrayOfConnection>

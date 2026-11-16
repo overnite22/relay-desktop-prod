@@ -1,0 +1,31 @@
+[package]
+name = "relay-desktop"
+description = "Relay Desktop – native Windows client for Relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+relay-desktop-core = { path = "../core" }
+keyring = { version = "3", features = ["windows-native"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slint = { version = "1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility", "raw-window-handle-06"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+fontdue = "0.9.5"
+vt100 = "0.18.1"
+arboard = "3.7.0"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+raw-window-handle = "0.6"
+vnc-rs = "0.6.1"
+futures-util = "0.3.34"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[build-dependencies]
+slint-build = "1"
+winresource = "0.1"
