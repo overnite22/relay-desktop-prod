@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
+#[derive(Default)]
 pub struct Params {
     pub host: String,
     pub port: u16,
@@ -22,6 +23,12 @@ pub struct Params {
     pub cols: u16,
     pub rows: u16,
     pub known_hosts: PathBuf,
+    /// Seconds between keepalives (0 = none).
+    pub keepalive: u32,
+    /// Try the keys of the local SSH agent (OpenSSH agent pipe, then Pageant).
+    pub agent: bool,
+    /// Private key file read when `private_key` is empty.
+    pub key_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -112,7 +119,7 @@ async fn open(p: &Params) -> Result<(client::Handle<Client>, String, bool), Stri
     };
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
-        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        keepalive_interval: (p.keepalive > 0).then(|| std::time::Duration::from_secs(p.keepalive.into())),
         ..Default::default()
     });
     let connect = client::connect(config, (p.host.as_str(), p.port), handler);
@@ -133,7 +140,21 @@ async fn open(p: &Params) -> Result<(client::Handle<Client>, String, bool), Stri
     };
 
     let mut authenticated = false;
-    if let Some(pem) = p.private_key.as_deref().filter(|k| !k.trim().is_empty()) {
+    let from_file = match (&p.key_file, p.private_key.as_deref().is_some_and(|k| !k.trim().is_empty())) {
+        (Some(path), false) => Some(Zeroizing::new(
+            std::fs::read_to_string(path).map_err(|e| format!("fichier de clé {} illisible : {e}", path.display()))?,
+        )),
+        _ => None,
+    };
+    if p.agent {
+        authenticated = agent_auth(&mut session, &p.username).await;
+    }
+    if let Some(pem) = p
+        .private_key
+        .as_ref()
+        .or(from_file.as_ref())
+        .filter(|k| !k.trim().is_empty() && !authenticated)
+    {
         let key = russh::keys::decode_secret_key(pem, p.passphrase.as_deref().map(|s| s.as_str()).filter(|s| !s.is_empty()))
             .map_err(|e| format!("clé privée illisible : {e}"))?;
         let hash = session.best_supported_rsa_hash().await.ok().flatten().flatten();
@@ -158,6 +179,48 @@ async fn open(p: &Params) -> Result<(client::Handle<Client>, String, bool), Stri
     }
 
     Ok((session, fingerprint, new_key))
+}
+
+/// Tries every key of the local SSH agent; errors only mean "not authenticated".
+async fn agent_auth(session: &mut client::Handle<Client>, user: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use russh::keys::agent::client::AgentClient;
+        if let Ok(mut agent) = AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+            if agent_try(session, user, &mut agent).await {
+                return true;
+            }
+        }
+        if let Ok(mut agent) = AgentClient::connect_pageant().await {
+            return agent_try(session, user, &mut agent).await;
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        match russh::keys::agent::client::AgentClient::connect_env().await {
+            Ok(mut agent) => agent_try(session, user, &mut agent).await,
+            Err(_) => false,
+        }
+    }
+}
+
+async fn agent_try<S>(session: &mut client::Handle<Client>, user: &str, agent: &mut russh::keys::agent::client::AgentClient<S>) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use russh::keys::agent::AgentIdentity;
+    let Ok(ids) = agent.request_identities().await else { return false };
+    let hash = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+    for id in ids {
+        let AgentIdentity::PublicKey { key, .. } = id else { continue };
+        if let Ok(r) = session.authenticate_publickey_with(user, key, hash, agent).await {
+            if r.success() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn run(p: Params, mut rx: mpsc::UnboundedReceiver<Input>, events: impl Fn(Event)) -> Result<(), String> {

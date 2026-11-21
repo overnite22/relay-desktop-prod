@@ -216,7 +216,7 @@ pub struct Tree {
 }
 
 /// Go encodes empty slices and maps as `null`.
-fn nullable<'de, D: serde::Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+pub(crate) fn nullable<'de, D: serde::Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
@@ -270,5 +270,38 @@ pub fn attachment_name(raw: &str) -> Option<String> {
         None
     } else {
         Some(name.to_owned())
+    }
+}
+
+/// Formats a server / database timestamp (RFC 3339, UTC) in local time:
+/// `AAAA-MM-JJ HH:MM` (`:SS` with `seconds`). Unknown formats are shown as is.
+pub fn local_time(s: &str, seconds: bool) -> String {
+    use time::{format_description::well_known::Rfc3339, macros::format_description, OffsetDateTime, UtcOffset};
+    let raw = || s.replace('T', " ").chars().take(if seconds { 19 } else { 16 }).collect();
+    let Ok(t) = OffsetDateTime::parse(s.trim(), &Rfc3339) else {
+        return raw();
+    };
+    let t = UtcOffset::local_offset_at(t).map_or(t, |o| t.to_offset(o));
+    let out = if seconds {
+        t.format(format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"))
+    } else {
+        t.format(format_description!("[year]-[month]-[day] [hour]:[minute]"))
+    };
+    out.unwrap_or_else(|_| raw())
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::local_time;
+
+    #[test]
+    fn local_time_formats() {
+        // The offset depends on the machine: only the shape is checked.
+        let t = local_time("2026-11-18T07:52:09.437Z", true);
+        assert_eq!(t.len(), 19, "{t}");
+        assert!(t.starts_with("2026-11-1"), "{t}");
+        assert_eq!(local_time("2026-11-18T07:52:09Z", false).len(), 16);
+        assert_eq!(local_time("hier", false), "hier");
+        assert_eq!(local_time("", true), "");
     }
 }

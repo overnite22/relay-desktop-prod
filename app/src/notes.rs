@@ -81,7 +81,7 @@ fn fill(ui: &AppWindow) {
             .map(|a| ListRow {
                 name: a.name.clone().into(),
                 detail: size(a.size).into(),
-                extra: a.created_at.replace('T', " ").chars().take(16).collect::<String>().into(),
+                extra: relay_desktop_core::model::local_time(&a.created_at, false).into(),
                 status: 0,
             })
             .collect()

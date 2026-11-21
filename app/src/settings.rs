@@ -33,6 +33,20 @@ pub struct Settings {
     /// "dark" or "light" (ribbon Affichage → Thème).
     #[serde(default)]
     pub theme: Option<String>,
+    /// Terminal font of SSH tabs (Options; an entry may override it).
+    #[serde(default)]
+    pub term_font: Option<String>,
+    /// Terminal font size in logical pixels (0 = 14).
+    #[serde(default)]
+    pub term_font_size: u32,
+    /// Default desktop size of RDP tabs: "fit", "fixed" or "fullscreen".
+    #[serde(default)]
+    pub rdp_resolution: Option<String>,
+    /// Fixed RDP size used when `rdp_resolution` is "fixed".
+    #[serde(default)]
+    pub rdp_width: u32,
+    #[serde(default)]
+    pub rdp_height: u32,
 }
 
 fn yes() -> bool {
@@ -54,6 +68,11 @@ impl Default for Settings {
             auto_update: true,
             last_update_check: 0,
             theme: None,
+            term_font: None,
+            term_font_size: 0,
+            rdp_resolution: None,
+            rdp_width: 0,
+            rdp_height: 0,
         }
     }
 }

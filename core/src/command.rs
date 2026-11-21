@@ -121,6 +121,8 @@ fn params(
         cols: 80,
         rows: 24,
         known_hosts: known_hosts.to_owned(),
+        keepalive: 30,
+        ..Default::default()
     })
 }
 

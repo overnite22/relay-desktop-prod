@@ -2,6 +2,7 @@
 //! (mstscax.dll, the one used by mstsc and RDM) hosted in a child window of
 //! the Slint window through the system ATL host (`atl.dll`, `AtlAxWin`).
 
+use relay_desktop_core::conn::{RdpOptions, Resolution};
 use zeroize::Zeroizing;
 
 pub struct Params {
@@ -10,9 +11,13 @@ pub struct Params {
     pub username: String,
     pub domain: String,
     pub password: Option<Zeroizing<String>>,
-    /// Initial desktop size in physical pixels.
+    /// Size of the tab in physical pixels.
     pub width: u32,
     pub height: u32,
+    /// Settings of the entry.
+    pub opts: RdpOptions,
+    /// Resolved desktop size mode (never `Default`).
+    pub resolution: Resolution,
 }
 
 /// Connection state reported by the control (`Connected` property).
@@ -29,11 +34,19 @@ pub use imp::RdpSession;
 #[cfg(windows)]
 mod imp {
     use super::{Params, State};
+    use relay_desktop_core::conn::{Gateway, Resolution};
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Arc;
     use windows::core::{s, w, IUnknown, Interface, BSTR, GUID, HSTRING, PCWSTR};
     use windows::Win32::Foundation::{HWND, VARIANT_FALSE, VARIANT_TRUE};
-    use windows::Win32::System::Com::{IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::System::Com::{
+        IConnectionPoint, IConnectionPointContainer, IDispatch, IDispatch_Impl, IDispatch_Vtbl, ITypeInfo, DISPATCH_FLAGS, DISPATCH_METHOD,
+        DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO, INVOKE_PROPERTYPUT,
+    };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+    use windows::Win32::System::Ole::LoadTypeLib;
     use windows::Win32::System::Variant::{VariantClear, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_BSTR, VT_I4};
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -56,15 +69,80 @@ mod imp {
     const IID_MSTSCAX: GUID = GUID::from_u128(0x8c11efae_92c3_11d1_bc1e_00c04fa31489);
     const DISPID_PROPERTYPUT: i32 = -3;
     const LOCALE_USER_DEFAULT: u32 = 0x0400;
+    /// `OnDisconnected` and `OnFatalError` of IMsTscAxEvents.
+    const DISPID_ON_DISCONNECTED: i32 = 4;
+    const DISPID_ON_FATAL_ERROR: i32 = 10;
+    /// TS_PERF_DISABLE_WALLPAPER, TS_PERF_ENABLE_FONT_SMOOTHING, TS_PERF_ENABLE_DESKTOP_COMPOSITION.
+    const PERF_NO_WALLPAPER: i32 = 0x1;
+    const PERF_FONT_SMOOTHING: i32 = 0x80;
+    const PERF_COMPOSITION: i32 = 0x100;
 
     type AtlAxWinInit = unsafe extern "system" fn() -> i32;
     type AtlAxAttachControl = unsafe extern "system" fn(*mut c_void, HWND, *mut *mut c_void) -> windows::core::HRESULT;
+
+    /// Event interface of the control (dispinterface IMsTscAxEvents).
+    #[windows::core::interface("336d5562-efa8-482e-8cb3-c5c0fc7a7db6")]
+    unsafe trait IMsTscAxEvents: IDispatch {}
+
+    /// Event sink: only keeps the disconnection / fatal error codes.
+    #[windows::core::implement(IMsTscAxEvents)]
+    struct Events {
+        disc: Arc<AtomicI32>,
+        fatal: Arc<AtomicI32>,
+    }
+
+    impl IMsTscAxEvents_Impl for Events_Impl {}
+
+    impl IDispatch_Impl for Events_Impl {
+        fn GetTypeInfoCount(&self) -> windows::core::Result<u32> {
+            Ok(0)
+        }
+        fn GetTypeInfo(&self, _: u32, _: u32) -> windows::core::Result<ITypeInfo> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn GetIDsOfNames(&self, _: *const GUID, _: *const PCWSTR, _: u32, _: u32, _: *mut i32) -> windows::core::Result<()> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn Invoke(
+            &self,
+            id: i32,
+            _: *const GUID,
+            _: u32,
+            _: DISPATCH_FLAGS,
+            params: *const DISPPARAMS,
+            _: *mut VARIANT,
+            _: *mut EXCEPINFO,
+            _: *mut u32,
+        ) -> windows::core::Result<()> {
+            let target = match id {
+                DISPID_ON_DISCONNECTED => &self.disc,
+                DISPID_ON_FATAL_ERROR => &self.fatal,
+                _ => return Ok(()),
+            };
+            // Single LONG argument.
+            unsafe {
+                if let Some(p) = params.as_ref().filter(|p| p.cArgs >= 1 && !p.rgvarg.is_null()) {
+                    let v = &*(*p.rgvarg).Anonymous.Anonymous;
+                    target.store(
+                        if v.vt == VT_I4 { v.Anonymous.lVal } else { v.Anonymous.iVal as i32 },
+                        Ordering::Release,
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
 
     pub struct RdpSession {
         hwnd: HWND,
         ax: IDispatch,
         size: (u32, u32),
         visible: bool,
+        /// Follow the tab size (dynamic resolution).
+        fit: bool,
+        disc: Arc<AtomicI32>,
+        fatal: Arc<AtomicI32>,
+        events: Option<(IConnectionPoint, u32)>,
     }
 
     fn variant(vt: windows::Win32::System::Variant::VARENUM, data: VARIANT_0_0_0) -> VARIANT {
@@ -188,6 +266,73 @@ mod imp {
         }
     }
 
+    /// Calls `put_<prop>(VARIANT_BOOL)` of a vtable-only IMsRdpClientNonScriptable*
+    /// interface, found by name in the control's type library (no hard-coded
+    /// IID or vtable slot).
+    fn put_nonscriptable_bool(unk: &IUnknown, prop: &str, value: bool) -> Result<(), String> {
+        unsafe {
+            let lib = LoadTypeLib(w!("mstscax.dll")).map_err(|e| e.to_string())?;
+            for i in 0..lib.GetTypeInfoCount() {
+                let mut name = BSTR::new();
+                if lib
+                    .GetDocumentation(i as i32, Some(&mut name), None, std::ptr::null_mut(), None)
+                    .is_err()
+                    || !name.to_string().starts_with("IMsRdpClientNonScriptable")
+                {
+                    continue;
+                }
+                let Ok(info) = lib.GetTypeInfo(i) else { continue };
+                let Ok(attr) = info.GetTypeAttr() else { continue };
+                let (iid, count) = ((*attr).guid, (*attr).cFuncs);
+                info.ReleaseTypeAttr(attr);
+                for f in 0..count {
+                    let Ok(fd) = info.GetFuncDesc(f as u32) else { continue };
+                    let (memid, kind, offset) = ((*fd).memid, (*fd).invkind, (*fd).oVft);
+                    info.ReleaseFuncDesc(fd);
+                    if kind != INVOKE_PROPERTYPUT {
+                        continue;
+                    }
+                    let mut fname = BSTR::new();
+                    if info
+                        .GetDocumentation(memid, Some(&mut fname), None, std::ptr::null_mut(), None)
+                        .is_ok()
+                        && fname == prop
+                    {
+                        return put_vtable_bool(unk, &iid, offset as usize / std::mem::size_of::<usize>(), value);
+                    }
+                }
+            }
+        }
+        Err(format!("{prop} : propriété absente de mstscax.dll"))
+    }
+
+    fn get_string(d: &IDispatch, name: &str, args: Vec<VARIANT>) -> Option<String> {
+        let mut r = invoke(d, name, DISPATCH_METHOD, args).ok()?;
+        let s = unsafe {
+            let inner = &*r.Anonymous.Anonymous;
+            (inner.vt == VT_BSTR).then(|| inner.Anonymous.bstrVal.to_string())
+        };
+        unsafe {
+            let _ = VariantClear(&mut r);
+        }
+        s
+    }
+
+    /// Size of the monitor showing `hwnd` (physical pixels).
+    fn monitor_size(hwnd: HWND) -> Option<(u32, u32)> {
+        unsafe {
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            GetMonitorInfoW(mon, &mut mi).as_bool().then(|| {
+                let r = mi.rcMonitor;
+                ((r.right - r.left) as u32, (r.bottom - r.top) as u32)
+            })
+        }
+    }
+
     impl RdpSession {
         /// Creates the control inside `parent` and starts connecting.
         pub fn connect(parent: isize, rect: (i32, i32, i32, i32), p: &Params) -> Result<RdpSession, String> {
@@ -249,20 +394,46 @@ mod imp {
                     break;
                 }
                 let (hwnd, unk, ax) = created.ok_or(last_err)?;
-                let session = RdpSession {
+                let (disc, fatal) = (Arc::new(AtomicI32::new(0)), Arc::new(AtomicI32::new(0)));
+                // Disconnection reasons only reach the container through events.
+                let events = unk.cast::<IConnectionPointContainer>().ok().and_then(|cpc| {
+                    let cp = cpc.FindConnectionPoint(&IMsTscAxEvents::IID).ok()?;
+                    let sink: IMsTscAxEvents = Events {
+                        disc: disc.clone(),
+                        fatal: fatal.clone(),
+                    }
+                    .into();
+                    let cookie = cp.Advise(&sink.cast::<IUnknown>().ok()?).ok()?;
+                    Some((cp, cookie))
+                });
+                let mut session = RdpSession {
                     hwnd,
                     ax,
                     size: (p.width, p.height),
                     visible: false,
+                    fit: p.resolution == Resolution::Fit,
+                    disc,
+                    fatal,
+                    events,
                 };
-                session.configure(&unk, p).map_err(|e| format!("configuration RDP : {e}"))?;
+                session
+                    .configure(&unk, p, HWND(parent as *mut c_void))
+                    .map_err(|e| format!("configuration RDP : {e}"))?;
                 invoke(&session.ax, "Connect", DISPATCH_METHOD, vec![]).map_err(|e| format!("connexion RDP : {e}"))?;
                 Ok(session)
             }
         }
 
-        fn configure(&self, unk: &IUnknown, p: &Params) -> windows::core::Result<()> {
+        fn configure(&mut self, unk: &IUnknown, p: &Params, parent: HWND) -> windows::core::Result<()> {
             let ax = &self.ax;
+            let o = &p.opts;
+            let full = p.resolution == Resolution::FullScreen;
+            let (w, h) = match p.resolution {
+                Resolution::Fixed => (o.width, o.height),
+                Resolution::FullScreen => monitor_size(parent).unwrap_or((p.width, p.height)),
+                _ => (p.width, p.height),
+            };
+            self.size = (w, h);
             put(ax, "Server", v_str(&p.host))?;
             if !p.username.is_empty() {
                 put(ax, "UserName", v_str(&p.username))?;
@@ -270,25 +441,67 @@ mod imp {
             if !p.domain.is_empty() {
                 put(ax, "Domain", v_str(&p.domain))?;
             }
-            put(ax, "DesktopWidth", v_i4(p.width.clamp(200, 8192) as i32))?;
-            put(ax, "DesktopHeight", v_i4(p.height.clamp(200, 8192) as i32))?;
-            let _ = put(ax, "ColorDepth", v_i4(32));
+            put(ax, "DesktopWidth", v_i4(w.clamp(200, 8192) as i32))?;
+            put(ax, "DesktopHeight", v_i4(h.clamp(200, 8192) as i32))?;
+            let _ = put(ax, "ColorDepth", v_i4(o.depth() as i32));
             let _ = put(ax, "ConnectingText", v_str("Connexion en cours…"));
             let _ = put(ax, "DisconnectedText", v_str("Session déconnectée"));
             let adv = get_dispatch(ax, "AdvancedSettings9").or_else(|_| get_dispatch(ax, "AdvancedSettings2"))?;
             put(&adv, "RDPPort", v_i4(p.port as i32))?;
+            let has_password = p.password.as_ref().is_some_and(|s| !s.is_empty());
             if let Some(pw) = p.password.as_ref().filter(|s| !s.is_empty()) {
                 put(&adv, "ClearTextPassword", v_str(pw))?;
             }
-            // Server identity checks stay on: the control warns about unknown certificates.
-            let _ = put(&adv, "AuthenticationLevel", v_i4(2));
-            let _ = put(&adv, "EnableCredSspSupport", v_bool(true));
-            let _ = put(&adv, "RedirectClipboard", v_bool(true));
+            // Certificate warnings stay on unless the entry explicitly ignores them.
+            let _ = put(&adv, "AuthenticationLevel", v_i4(if o.ignore_cert == Some(true) { 0 } else { 2 }));
+            let nla = matches!(o.security.as_str(), "any" | "nla");
+            let _ = put(&adv, "EnableCredSspSupport", v_bool(nla));
+            let _ = put(&adv, "RedirectClipboard", v_bool(o.clipboard()));
+            let _ = put(&adv, "RedirectDrives", v_bool(o.drives));
+            let _ = put(&adv, "RedirectPrinters", v_bool(o.printers));
             let _ = put(&adv, "EnableAutoReconnect", v_bool(true));
-            let _ = put(&adv, "SmartSizing", v_bool(true));
+            let _ = put(&adv, "SmartSizing", v_bool(!full));
             let _ = put(&adv, "GrabFocusOnConnect", v_bool(true));
+            let mut perf = PERF_FONT_SMOOTHING | PERF_COMPOSITION;
+            if !o.wallpaper {
+                perf |= PERF_NO_WALLPAPER;
+            }
+            let _ = put(&adv, "PerformanceFlags", v_i4(perf));
+            if o.console && put(&adv, "ConnectToAdministerServer", v_bool(true)).is_err() {
+                let _ = put(&adv, "ConnectToServerConsole", v_bool(true));
+            }
+            if let Ok(sec) = get_dispatch(ax, "SecuredSettings2") {
+                let _ = put(&sec, "AudioRedirectionMode", v_i4(o.audio.mode()));
+            }
+            if o.gateway != Gateway::None {
+                let ts = get_dispatch(ax, "TransportSettings2").or_else(|_| get_dispatch(ax, "TransportSettings"))?;
+                put(&ts, "GatewayHostname", v_str(o.gateway_host.trim()))?;
+                put(&ts, "GatewayUsageMethod", v_i4(o.gateway.usage_method()))?;
+                let _ = put(&ts, "GatewayProfileUsageMethod", v_i4(1));
+                // TSC_PROXY_CREDS_MODE_ANY; shared credentials reuse those of the session.
+                let _ = put(&ts, "GatewayCredsSource", v_i4(4));
+                let _ = put(&ts, "GatewayCredSharing", v_i4(i32::from(o.gateway_same_creds)));
+            }
+            if full {
+                let _ = put(&adv, "ContainerHandledFullScreen", v_i4(0));
+                let _ = put(&adv, "DisplayConnectionBar", v_bool(true));
+                let _ = put(&adv, "PinConnectionBar", v_bool(true));
+                let _ = put(ax, "FullScreenTitle", v_str(&p.host));
+                if o.multi_mon {
+                    let _ = put_nonscriptable_bool(unk, "UseMultimon", true);
+                }
+                let _ = put(ax, "FullScreen", v_bool(true));
+            }
             // NLA (CredSSP) is only reachable through the non-scriptable interface.
-            let _ = put_vtable_bool(unk, &IID_NONSCRIPTABLE3, VT_PUT_ENABLE_CREDSSP, true);
+            let _ = put_vtable_bool(unk, &IID_NONSCRIPTABLE3, VT_PUT_ENABLE_CREDSSP, nla);
+            if o.security == "rdp" {
+                let _ = put_nonscriptable_bool(unk, "NegotiateSecurityLayer", false);
+            }
+            // With a stored password, a refusal ends the session with its reason (banner
+            // and "Reconnecter") instead of a Windows credential prompt.
+            if has_password {
+                let _ = put_nonscriptable_bool(unk, "AllowPromptingForCredentials", false);
+            }
             Ok(())
         }
 
@@ -300,8 +513,40 @@ mod imp {
             }
         }
 
-        /// Places the control over the tab area (client pixels) and shows/hides it.
-        pub fn place(&mut self, rect: (i32, i32, i32, i32), visible: bool) {
+        /// Readable reason of the last disconnection (`None`: normal end).
+        pub fn disconnect_text(&self) -> Option<String> {
+            let fatal = self.fatal.load(Ordering::Acquire);
+            if fatal != 0 {
+                return Some(format!("Erreur fatale du contrôle Bureau à distance (code {fatal})"));
+            }
+            let disc = self.disc.load(Ordering::Acquire);
+            let ext = get_i32(&self.ax, "ExtendedDisconnectReason").unwrap_or(0);
+            if let Some(t) = relay_desktop_core::conn::rdp_disconnect_text(disc, ext) {
+                return Some(t);
+            }
+            if disc <= 3 {
+                return None;
+            }
+            let desc = get_string(&self.ax, "GetErrorDescription", vec![v_i4(disc), v_i4(ext)]).filter(|s| !s.trim().is_empty());
+            Some(match desc {
+                Some(d) => format!("Déconnecté : {} (code {disc})", d.trim()),
+                None => format!("Déconnecté (code {disc}, motif étendu {ext})"),
+            })
+        }
+
+        /// Gives the keyboard focus to the session.
+        pub fn focus(&self) {
+            if self.visible {
+                unsafe {
+                    let _ = SetFocus(Some(self.hwnd));
+                }
+            }
+        }
+
+        /// Places the control over the tab area (client pixels) and shows/hides it;
+        /// true when it has just been hidden (the area it covered must be repainted).
+        pub fn place(&mut self, rect: (i32, i32, i32, i32), visible: bool) -> bool {
+            let hidden = self.visible && !visible;
             unsafe {
                 if visible {
                     let _ = MoveWindow(self.hwnd, rect.0, rect.1, rect.2.max(1), rect.3.max(1), true);
@@ -314,12 +559,14 @@ mod imp {
                     self.visible = visible;
                 }
             }
+            hidden
         }
 
-        /// Asks the server to adopt a new resolution (dynamic resolution, RDP 8.1+).
+        /// Asks the server to adopt a new resolution (dynamic resolution, RDP 8.1+),
+        /// only when the entry follows the tab size.
         pub fn resize_desktop(&mut self, width: u32, height: u32) {
             let (width, height) = (width.clamp(200, 8192) & !1, height.clamp(200, 8192));
-            if (width, height) == self.size || self.state() != State::Connected {
+            if !self.fit || (width, height) == self.size || self.state() != State::Connected {
                 return;
             }
             let args = vec![
@@ -347,6 +594,9 @@ mod imp {
         fn drop(&mut self) {
             self.disconnect();
             unsafe {
+                if let Some((cp, cookie)) = self.events.take() {
+                    let _ = cp.Unadvise(cookie);
+                }
                 let _ = DestroyWindow(self.hwnd);
             }
         }
@@ -364,6 +614,10 @@ impl RdpSession {
     pub fn state(&self) -> State {
         State::Disconnected
     }
+    pub fn disconnect_text(&self) -> Option<String> {
+        None
+    }
+    pub fn focus(&self) {}
     pub fn place(&mut self, _: (i32, i32, i32, i32), _: bool) {}
     pub fn resize_desktop(&mut self, _: u32, _: u32) {}
     pub fn disconnect(&self) {}

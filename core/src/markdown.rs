@@ -107,7 +107,80 @@ pub fn inline(text: &str) -> String {
         }
     }
     out.push_str(rest);
-    out.replace('<', "\\<")
+    autolink(&out).replace('<', "\\<")
+}
+
+/// Turns bare http(s) URLs into Markdown links so they can be clicked. URLs
+/// already inside a link (text or target) or a code span are left alone.
+fn autolink(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let (mut in_code, mut brackets, mut in_target) = (false, 0usize, 0usize);
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let c = rest.chars().next().unwrap_or(' ');
+        let starts_url = !in_code
+            && brackets == 0
+            && in_target == 0
+            && (rest.starts_with("http://") || rest.starts_with("https://"))
+            && !out.ends_with(|p: char| p.is_alphanumeric() || p == '\\' || p == '/');
+        if starts_url {
+            let end = rest.find(|p: char| p.is_whitespace() || "<>\"`".contains(p)).unwrap_or(rest.len());
+            let mut url = &rest[..end];
+            loop {
+                let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_', '\'']);
+                let trimmed = if trimmed.ends_with(')') && trimmed.matches('(').count() < trimmed.matches(')').count() {
+                    &trimmed[..trimmed.len() - 1]
+                } else {
+                    trimmed
+                };
+                if trimmed == url {
+                    break;
+                }
+                url = trimmed;
+            }
+            if url.len() > "https://".len() {
+                out.push('[');
+                for ch in url.chars() {
+                    if "\\*_[]`~".contains(ch) {
+                        out.push('\\');
+                    }
+                    out.push(ch);
+                }
+                out.push_str("](");
+                out.push_str(url);
+                out.push(')');
+                i += url.len();
+                continue;
+            }
+        }
+        match c {
+            '\\' if !in_code => {
+                // Keep escaped characters as they are.
+                let n = rest.chars().nth(1).map(|n| n.len_utf8()).unwrap_or(0);
+                out.push_str(&rest[..1 + n]);
+                i += 1 + n;
+                continue;
+            }
+            '`' => in_code = !in_code,
+            '[' if !in_code => brackets += 1,
+            ']' if !in_code && brackets > 0 => {
+                brackets -= 1;
+                if brackets == 0 && rest[1..].starts_with('(') {
+                    out.push_str("](");
+                    in_target = 1;
+                    i += 2;
+                    continue;
+                }
+            }
+            '(' if in_target > 0 => in_target += 1,
+            ')' if in_target > 0 => in_target -= 1,
+            _ => {}
+        }
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 pub fn parse(notes: &str) -> Vec<Block> {
@@ -272,6 +345,20 @@ mod tests {
         assert_eq!(parse("#hashtag"), vec![Block::Paragraph("#hashtag".into())]);
         assert!(safe_link("https://x") && !safe_link("mailto:a@b"));
         assert!(!safe_link("file:///c:/x") && !safe_link("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn bare_urls_become_links() {
+        assert_eq!(inline("voir https://a.b/doc."), "voir [https://a.b/doc](https://a.b/doc).");
+        assert_eq!(inline("(https://a.b/x?y=1)"), "([https://a.b/x?y=1](https://a.b/x?y=1))");
+        assert_eq!(inline("https://a.b/w_(x)"), "[https://a.b/w\\_(x)](https://a.b/w_(x))");
+        assert_eq!(
+            inline("[site](https://a.b) et [https://c.d](https://c.d)"),
+            "[site](https://a.b) et [https://c.d](https://c.d)"
+        );
+        assert_eq!(inline("`curl https://a.b` http://"), "`curl https://a.b` http://");
+        assert_eq!(inline("x\\https://a.b"), "x\\https://a.b");
+        assert_eq!(inline("é https://a.b/é <b>"), "é [https://a.b/é](https://a.b/é) \\<b>");
     }
 
     #[test]

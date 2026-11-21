@@ -34,8 +34,9 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    /// Loads Consolas (or another monospace font shipped with Windows).
-    pub fn load() -> Option<Arc<Fonts>> {
+    /// Loads the Windows font file `file` (falls back on Consolas or another
+    /// monospace font shipped with Windows).
+    pub fn load(file: &str) -> Option<Arc<Fonts>> {
         let dir = std::env::var_os("SystemRoot")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| r"C:\Windows".into())
@@ -45,19 +46,40 @@ impl Fonts {
                 .ok()
                 .and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok())
         };
-        let regular = ["consola.ttf", "CascadiaMono.ttf", "lucon.ttf", "cour.ttf"]
+        let (name, regular) = [file, "consola.ttf", "CascadiaMono.ttf", "lucon.ttf", "cour.ttf"]
             .iter()
-            .find_map(|n| read(n))?;
-        Some(Arc::new(Fonts {
-            regular,
-            bold: read("consolab.ttf"),
-        }))
+            .find_map(|n| read(n).map(|f| (*n, f)))?;
+        let bold = match name {
+            "consola.ttf" => read("consolab.ttf"),
+            "cour.ttf" => read("courbd.ttf"),
+            _ => None,
+        };
+        Some(Arc::new(Fonts { regular, bold }))
+    }
+}
+
+/// Colours and history of a terminal (entry settings).
+#[derive(Clone, Copy)]
+pub struct Style {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub scrollback: usize,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Style {
+            fg: FG,
+            bg: BG,
+            scrollback: 5000,
+        }
     }
 }
 
 pub struct Term {
     parser: vt100::Parser,
     fonts: Arc<Fonts>,
+    style: Style,
     px: f32,
     cell_w: usize,
     cell_h: usize,
@@ -88,21 +110,44 @@ fn color(c: vt100::Color, default: [u8; 3]) -> [u8; 3] {
 }
 
 impl Term {
-    pub fn new(fonts: Arc<Fonts>, px: f32, rows: u16, cols: u16) -> Term {
-        let lm = fonts.regular.horizontal_line_metrics(px);
-        let ascent = lm.map(|m| m.ascent).unwrap_or(px * 0.8);
-        let cell_h = lm.map(|m| m.new_line_size.ceil() as usize).unwrap_or((px * 1.2) as usize).max(1);
-        let cell_w = fonts.regular.metrics('M', px).advance_width.ceil().max(1.0) as usize;
-        Term {
-            parser: vt100::Parser::new(nz(rows), nz(cols), 5000),
+    pub fn new(fonts: Arc<Fonts>, px: f32, rows: u16, cols: u16, style: Style) -> Term {
+        let mut t = Term {
+            parser: vt100::Parser::new(nz(rows), nz(cols), style.scrollback),
             fonts,
-            px,
-            cell_w,
-            cell_h,
-            ascent,
+            style,
+            px: 0.0,
+            cell_w: 1,
+            cell_h: 1,
+            ascent: 0.0,
             glyphs: HashMap::new(),
             scroll: 0,
+        };
+        t.set_px(px);
+        t
+    }
+
+    /// Changes the font size: new cell metrics, glyph cache dropped.
+    pub fn set_px(&mut self, px: f32) {
+        let px = px.max(4.0);
+        if px == self.px {
+            return;
         }
+        let lm = self.fonts.regular.horizontal_line_metrics(px);
+        // Some fonts (Lucida Console) declare a line smaller than their glyphs:
+        // grow the cell to the real extent of tall and descending characters so
+        // a row background never covers the row above or below.
+        let (mut top, mut bottom) = (0f32, 0f32);
+        for ch in ['M', 'É', 'g', 'j', 'p', 'y', '|', '_', '(', '['] {
+            let m = self.fonts.regular.metrics(ch, px);
+            top = top.max((m.height as i32 + m.ymin) as f32);
+            bottom = bottom.max(-m.ymin as f32);
+        }
+        self.ascent = lm.map(|m| m.ascent).unwrap_or(px * 0.8).max(top).ceil();
+        let line = lm.map(|m| m.new_line_size).unwrap_or(px * 1.2);
+        self.cell_h = line.max(self.ascent + bottom).ceil().max(1.0) as usize;
+        self.cell_w = self.fonts.regular.metrics('M', px).advance_width.ceil().max(1.0) as usize;
+        self.px = px;
+        self.glyphs.clear();
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -143,10 +188,11 @@ impl Term {
     pub fn render(&mut self) -> SharedPixelBuffer<Rgba8Pixel> {
         let (rows, cols) = self.size();
         let (w, h) = (cols as usize * self.cell_w, rows as usize * self.cell_h);
+        let (fg0, bg0) = (self.style.fg, self.style.bg);
         let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
         let px = buf.make_mut_bytes();
         for chunk in px.as_chunks_mut::<4>().0 {
-            chunk.copy_from_slice(&[BG[0], BG[1], BG[2], 255]);
+            chunk.copy_from_slice(&[bg0[0], bg0[1], bg0[2], 255]);
         }
         let screen = self.parser.screen();
         let glyphs = &mut self.glyphs;
@@ -154,14 +200,14 @@ impl Term {
         let (size, ascent, cell_w, cell_h) = (self.px, self.ascent, self.cell_w, self.cell_h);
         let (cur_r, cur_c) = screen.cursor_position();
         let show_cursor = !screen.hide_cursor() && self.scroll == 0;
-        for r in 0..rows {
+        for (pass, r) in (0..2).flat_map(|p| (0..rows).map(move |r| (p, r))) {
             for c in 0..cols {
                 let Some(cell) = screen.cell(r, c) else { continue };
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let mut fg = color(cell.fgcolor(), FG);
-                let mut bg = color(cell.bgcolor(), BG);
+                let mut fg = color(cell.fgcolor(), fg0);
+                let mut bg = color(cell.bgcolor(), bg0);
                 if cell.bold() {
                     if let vt100::Color::Idx(i) = cell.fgcolor() {
                         if i < 8 {
@@ -174,17 +220,22 @@ impl Term {
                 }
                 let span = if cell.is_wide() { 2 } else { 1 };
                 let (x0, y0) = (c as usize * cell_w, r as usize * cell_h);
-                if bg != BG {
-                    for y in y0..y0 + cell_h {
-                        for x in x0..(x0 + cell_w * span).min(w) {
-                            let i = (y * w + x) * 4;
-                            px[i..i + 3].copy_from_slice(&bg);
+                if pass == 0 {
+                    if bg != bg0 {
+                        for y in y0..y0 + cell_h {
+                            for x in x0..(x0 + cell_w * span).min(w) {
+                                let i = (y * w + x) * 4;
+                                px[i..i + 3].copy_from_slice(&bg);
+                            }
                         }
                     }
+                    continue;
                 }
+                // Glyphs come after every background so a glyph running past
+                // its cell is never covered by the next row or column.
                 let text = cell.contents();
                 if let Some(ch) = text.chars().next().filter(|c| !c.is_whitespace()) {
-                    draw_glyph(glyphs, fonts, size, ascent, px, (w, h), (x0, y0), ch, cell.bold(), fg, bg);
+                    draw_glyph(glyphs, fonts, size, ascent, px, (w, h), (x0, y0), ch, cell.bold(), fg);
                 }
                 if cell.underline() {
                     let y = y0 + cell_h - 2;
@@ -211,7 +262,6 @@ fn draw_glyph(
     ch: char,
     bold: bool,
     fg: [u8; 3],
-    bg: [u8; 3],
 ) {
     let (m, bitmap) = glyphs.entry((ch, bold)).or_insert_with(|| {
         let font = if bold {
@@ -239,7 +289,7 @@ fn draw_glyph(
             }
             let i = (y as usize * w + x as usize) * 4;
             for k in 0..3 {
-                px[i + k] = ((fg[k] as u32 * a + bg[k] as u32 * (255 - a)) / 255) as u8;
+                px[i + k] = ((fg[k] as u32 * a + px[i + k] as u32 * (255 - a)) / 255) as u8;
             }
         }
     }

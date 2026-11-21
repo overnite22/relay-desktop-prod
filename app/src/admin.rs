@@ -23,10 +23,12 @@ pub struct Admin {
     recordings: Vec<Recording>,
     plan: Option<ImportPlan>,
     plan_data: Vec<u8>,
+    /// Sync source being edited (`None`: new source).
+    src_edit: Option<String>,
 }
 
 fn date(s: &str) -> String {
-    s.replace('T', " ").chars().take(16).collect()
+    relay_desktop_core::model::local_time(s, false)
 }
 
 fn size(n: i64) -> String {
@@ -42,12 +44,20 @@ fn rows(ui: &AppWindow, rows: Vec<ListRow>) {
     ui.set_adm_selected(-1);
 }
 
-fn open_list(ui: &AppWindow, mode: Mode, title: &str, hint: &str, actions: &[&str]) {
+/// Opens an administration list; each action is (label, needs a selected row).
+fn open_list(ui: &AppWindow, mode: Mode, title: &str, hint: &str, actions: &[(&str, bool)]) {
     with(|s| s.admin.mode = mode);
     ui.set_adm_title(title.into());
     ui.set_adm_hint(hint.into());
     ui.set_adm_detail("".into());
-    ui.set_adm_actions(strings(actions.iter().map(|a| a.to_string()).collect()));
+    let actions: Vec<AdmAction> = actions
+        .iter()
+        .map(|(label, sel)| AdmAction {
+            label: (*label).into(),
+            needs_selection: *sel,
+        })
+        .collect();
+    ui.set_adm_actions(ModelRc::new(VecModel::from(actions)));
     rows(ui, Vec::new());
     ui.set_dialog_error("".into());
     ui.set_dialog("admin".into());
@@ -85,12 +95,11 @@ fn reload(ui: &AppWindow) {
                         .collect();
                     with(|s| s.admin.sources = list);
                     rows(ui, r);
-                    if with(|s| s.admin.sources.is_empty()) {
-                        ui.set_adm_detail(
-                            "Aucune source : elles se créent et se configurent dans Relay web (Administration → Sources de synchro)."
-                                .into(),
-                        );
-                    }
+                    ui.set_adm_detail(if with(|s| s.admin.sources.is_empty()) {
+                        "Aucune source : « Nouvelle… » pour ajouter un serveur Proxmox VE ou NetBox.".into()
+                    } else {
+                        "".into()
+                    });
                 }
                 Err(e) => fail(ui, e),
             },
@@ -155,9 +164,11 @@ fn reload(ui: &AppWindow) {
                             status: 0,
                         })
                         .collect();
-                    if list.is_empty() {
-                        ui.set_adm_detail("Aucun enregistrement.".into());
-                    }
+                    ui.set_adm_detail(if list.is_empty() {
+                        "Aucun enregistrement.".into()
+                    } else {
+                        "".into()
+                    });
                     with(|s| s.admin.recordings = list);
                     rows(ui, r);
                 }
@@ -224,13 +235,14 @@ fn action(ui: &AppWindow, n: usize) {
             };
             let keep = g.entries[ei].clone();
             let others: Vec<String> = g.entries.iter().filter(|e| e.id != keep.id).map(|e| e.id.clone()).collect();
-            features::confirm(
+            features::confirm_as(
                 ui,
                 format!(
                     "Garder « {} » et y fusionner {} autre(s) entrée(s) ? Les autres seront supprimées (identifiant, utilisateur et notes repris).",
                     keep.name,
                     others.len()
                 ),
+                "Fusionner",
                 move |ui| {
                     bg(ui, "Fusion…", move || src.merge_entries(&keep.id, &others), |ui, r| match r {
                         Ok(e) => {
@@ -247,7 +259,37 @@ fn action(ui: &AppWindow, n: usize) {
                 },
             );
         }
-        (Mode::Duplicates, 1) | (Mode::Sources, 2) | (Mode::Recordings, 1) => reload(ui),
+        (Mode::Duplicates, 1) | (Mode::Sources, 5) | (Mode::Recordings, 1) => reload(ui),
+        (Mode::Sources, 2) => open_source_editor(ui, None),
+        (Mode::Sources, 3 | 4) => {
+            let Some(x) = selected(ui, |s| &s.admin.sources) else {
+                return fail(ui, "Sélectionnez une source.");
+            };
+            if n == 3 {
+                return open_source_editor(ui, Some(x));
+            }
+            features::confirm(
+                ui,
+                format!(
+                    "Supprimer la source « {} » ? Les entrées qu'elle a créées restent dans l'arborescence.",
+                    x.name
+                ),
+                move |ui| {
+                    let Some(src) = source() else { return };
+                    bg(
+                        ui,
+                        "Suppression de la source…",
+                        move || src.delete_sync_source(&x.id),
+                        |ui, r| match r {
+                            Ok(()) => {
+                                act(ui, "sources");
+                            }
+                            Err(e) => fail(ui, e),
+                        },
+                    );
+                },
+            );
+        }
         (Mode::Recordings, 0) => {
             let Some(x) = selected(ui, |s| &s.admin.recordings) else {
                 return fail(ui, "Sélectionnez un enregistrement.");
@@ -364,9 +406,10 @@ fn backup_restore(ui: &AppWindow) {
         return;
     };
     if server {
-        features::confirm(
+        features::confirm_as(
             ui,
             "Restaurer cette sauvegarde ? Tout le contenu actuel du serveur Relay (entrées, identifiants, réglages, enregistrements) sera remplacé.".into(),
+            "Restaurer",
             move |ui| {
                 bg(
                     ui,
@@ -558,8 +601,15 @@ pub fn act(ui: &AppWindow, id: &str) -> bool {
             ui,
             Mode::Sources,
             "Sources de synchronisation",
-            "Inventaires NetBox et Proxmox importés par le serveur Relay. La création et les réglages se font dans Relay web.",
-            &["Tester la connexion", "Synchroniser maintenant", "Actualiser"],
+            "Inventaires NetBox et Proxmox importés par le serveur Relay.",
+            &[
+                ("Tester la connexion", true),
+                ("Synchroniser maintenant", true),
+                ("Nouvelle…", false),
+                ("Modifier…", true),
+                ("Supprimer", true),
+                ("Actualiser", false),
+            ],
         ),
         "dups" => open_list(
             ui,
@@ -570,14 +620,14 @@ pub fn act(ui: &AppWindow, id: &str) -> bool {
             } else {
                 "Entrées visant la même cible (protocole, hôte, port ; sans résolution DNS en mode local)."
             },
-            &["Garder et fusionner", "Actualiser"],
+            &[("Garder et fusionner", true), ("Actualiser", false)],
         ),
         "recordings" => open_list(
             ui,
             Mode::Recordings,
             "Enregistrements de sessions",
             "Sessions enregistrées par le serveur Relay. La relecture se fait encore dans Relay web.",
-            &["Supprimer", "Actualiser"],
+            &[("Supprimer", true), ("Actualiser", false)],
         ),
         "adm-select" => {}
         "import" => {
@@ -610,4 +660,106 @@ pub fn act(ui: &AppWindow, id: &str) -> bool {
         },
     }
     true
+}
+
+/// Creation / edition form of a NetBox or Proxmox source (same fields as Relay web).
+fn open_source_editor(ui: &AppWindow, x: Option<SyncSource>) {
+    let creds = with(|s| s.creds.clone());
+    let cred_index = |id: &str| creds.iter().position(|c| !id.is_empty() && c.id == id).map_or(0, |i| i as i32 + 1);
+    let mut names = vec!["(aucun)".to_string()];
+    names.extend(creds.iter().map(|c| c.name.clone()));
+    ui.set_ss_cred_names(strings(names));
+    let v = x.clone().unwrap_or_else(|| SyncSource {
+        kind: "proxmox".into(),
+        verify_tls: true,
+        ..Default::default()
+    });
+    with(|s| s.admin.src_edit = x.map(|x| x.id));
+    ui.set_ss_title(if v.id.is_empty() { "Nouvelle source" } else { "Modifier la source" }.into());
+    ui.set_ss_kind(i32::from(v.kind == "netbox"));
+    ui.set_ss_name(v.name.clone().into());
+    ui.set_ss_url(v.url.clone().into());
+    ui.set_ss_token_id(v.token_id.clone().into());
+    ui.set_ss_secret("".into());
+    ui.set_ss_has_secret(v.has_secret);
+    ui.set_ss_verify_tls(v.verify_tls);
+    ui.set_ss_interval(
+        if v.interval_min > 0 {
+            v.interval_min.to_string()
+        } else {
+            String::new()
+        }
+        .into(),
+    );
+    ui.set_ss_ssh_cred(cred_index(v.option_str("sshCredentialId")));
+    ui.set_ss_rdp_cred(cred_index(v.option_str("rdpCredentialId")));
+    let netbox = v.kind == "netbox";
+    ui.set_ss_opt_a(v.option_on(if netbox { "devices" } else { "guestEntries" }));
+    ui.set_ss_opt_b(v.option_on(if netbox { "vms" } else { "nodeEntries" }));
+    ui.set_dialog_error("".into());
+    ui.set_dialog("sync-src".into());
+}
+
+pub fn submit_source(ui: &AppWindow) {
+    let Some(src) = source() else { return };
+    let (id, creds) = with(|s| (s.admin.src_edit.clone(), s.creds.clone()));
+    let netbox = ui.get_ss_kind() == 1;
+    let interval = ui.get_ss_interval();
+    let interval_min = if interval.trim().is_empty() {
+        0
+    } else {
+        match interval.trim().parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => return fail(ui, "Intervalle : nombre de minutes attendu."),
+        }
+    };
+    let cred = |i: i32| usize::try_from(i - 1).ok().and_then(|i| creds.get(i)).map(|c| c.id.clone());
+    let mut options = serde_json::Map::new();
+    // Keys of the other kind are dropped, like the web form.
+    for (key, value) in [
+        ("sshCredentialId", cred(ui.get_ss_ssh_cred())),
+        ("rdpCredentialId", cred(ui.get_ss_rdp_cred())),
+    ] {
+        if let Some(v) = value {
+            options.insert(key.into(), v.into());
+        }
+    }
+    let (a, b) = if netbox {
+        ("devices", "vms")
+    } else {
+        ("guestEntries", "nodeEntries")
+    };
+    options.insert(a.into(), ui.get_ss_opt_a().into());
+    options.insert(b.into(), ui.get_ss_opt_b().into());
+    let secret = ui.get_ss_secret().trim().to_string();
+    let input = relay_desktop_core::admin::SyncSourceInput {
+        kind: if netbox { "netbox" } else { "proxmox" }.into(),
+        name: ui.get_ss_name().trim().into(),
+        url: ui.get_ss_url().trim().trim_end_matches('/').into(),
+        token_id: if netbox {
+            String::new()
+        } else {
+            ui.get_ss_token_id().trim().into()
+        },
+        secret: (!secret.is_empty()).then_some(secret),
+        verify_tls: ui.get_ss_verify_tls(),
+        options,
+        interval_min,
+    };
+    if let Err(e) = input.validate(id.is_none()) {
+        return fail(ui, e);
+    }
+    ui.set_ss_secret("".into());
+    bg(
+        ui,
+        "Enregistrement de la source…",
+        move || src.save_sync_source(id.as_deref(), &input),
+        |ui, r| match r {
+            Ok(saved) => {
+                act(ui, "sources");
+                ui.set_status(format!("Source « {} » enregistrée.", saved.name).into());
+            }
+            Err(e) => fail(ui, e),
+        },
+    );
 }

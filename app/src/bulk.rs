@@ -36,7 +36,7 @@ fn label(r: &RunResult) -> (i32, String) {
 }
 
 fn fill(ui: &AppWindow) {
-    let (rows, summary) = with(|s| {
+    let (rows, summary, retryable) = with(|s| {
         let rows: Vec<ListRow> = s
             .cmd
             .results
@@ -64,10 +64,16 @@ fn fill(ui: &AppWindow) {
                 count(command::STATUS_PENDING) + count(command::STATUS_RUNNING)
             )
         };
-        (rows, summary)
+        let retryable = s
+            .cmd
+            .results
+            .iter()
+            .any(|r| [command::STATUS_FAILED, command::STATUS_ERROR, command::STATUS_CANCELED].contains(&r.status));
+        (rows, summary, retryable)
     });
     ui.set_cmd_rows(ModelRc::new(VecModel::from(rows)));
     ui.set_cmd_summary(summary.into());
+    ui.set_cmd_retryable(retryable);
     show_output(ui);
 }
 

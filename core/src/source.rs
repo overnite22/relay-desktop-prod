@@ -91,6 +91,13 @@ pub trait DataSource: Send + Sync {
     fn sync_sources(&self) -> Result<Vec<SyncSource>> {
         Err(server_only())
     }
+    /// Creates (`id: None`) or updates a synchronisation source.
+    fn save_sync_source(&self, _id: Option<&str>, _input: &crate::admin::SyncSourceInput) -> Result<SyncSource> {
+        Err(server_only())
+    }
+    fn delete_sync_source(&self, _id: &str) -> Result<()> {
+        Err(server_only())
+    }
     fn test_sync_source(&self, _id: &str) -> Result<Outcome> {
         Err(server_only())
     }

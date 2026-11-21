@@ -25,6 +25,7 @@ fn session(
         cols: 100,
         rows: 30,
         known_hosts: known.to_path_buf(),
+        ..Default::default()
     };
     let input = spawn(rt.handle(), p, move |e| {
         let _ = tx.send(e);
@@ -97,6 +98,7 @@ fn exec_live() {
         cols: 80,
         rows: 24,
         known_hosts: dir.path().join("kh.json"),
+        ..Default::default()
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let out = rt.block_on(relay_desktop_core::ssh::exec(&p, "hostname", None, 1 << 16)).unwrap();

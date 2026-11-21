@@ -11,6 +11,8 @@ export struct WsRow { name: string, detail: string }
 export struct NoteBlock { kind: string, text: styled-text, plain: string, depth: int, marker: string }
 // Generic list row for administration dialogs (attachments, devices, backups…).
 export struct ListRow { name: string, detail: string, extra: string, status: int }
+// Button of an administration list; needs-selection = disabled until a row is chosen.
+export struct AdmAction { label: string, needs-selection: bool }
 
 // Colors of the web version (styles.css), dark and light.
 export global Theme {
@@ -55,7 +57,7 @@ component RbLarge inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> on;
     callback clicked();
-    width: max(64px, min(86px, lbl.preferred-width + 14px));
+    width: max(64px, min(100px, lbl.preferred-width + 14px));
     height: 66px;
     border-radius: 4px;
     border-width: 1px;
@@ -116,6 +118,25 @@ component RbSmall inherits Rectangle {
         Ico { source: root.icon; width: 15px; height: 15px; y: 3px; tint: root.enabled ? root.tint : Theme.muted.with-alpha(0.45); }
         Text { text: root.label; font-size: 12px; vertical-alignment: center; color: root.enabled ? Theme.text : Theme.muted.with-alpha(0.55); }
     }
+}
+
+// Small icon button of the session tab bar (scroll arrows, list of tabs).
+component TabNavButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 24px;
+    background: ta.has-hover && root.enabled ? Theme.bg-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Ico { source: root.icon; width: 15px; height: 15px; tint: root.enabled ? Theme.text : Theme.muted.with-alpha(0.45); }
 }
 
 component RbColumn inherits VerticalLayout {
@@ -256,6 +277,7 @@ export component AppWindow inherits Window {
     in-out property <int> cmd-selected: -1;
     in property <string> cmd-output;
     in property <string> cmd-summary;
+    in property <bool> cmd-retryable;
     in property <bool> cmd-running;
     in-out property <string> bk-password;
     in-out property <string> bk-password2;
@@ -265,7 +287,7 @@ export component AppWindow inherits Window {
     in property <[ListRow]> adm-rows;
     in-out property <int> adm-selected: -1;
     in property <string> adm-detail;
-    in property <[string]> adm-actions;
+    in property <[AdmAction]> adm-actions;
     in-out property <string> imp-path;
     in-out property <string> imp-root: "Import RDM";
     in property <[string]> imp-cred-names;
@@ -312,6 +334,58 @@ export component AppWindow inherits Window {
     in-out property <int> e-cred;
     in-out property <int> e-folder;
     in-out property <string> e-notes;
+    // NetBox / Proxmox sync source editor.
+    in-out property <string> ss-title;
+    in-out property <int> ss-kind;
+    in-out property <string> ss-name;
+    in-out property <string> ss-url;
+    in-out property <string> ss-token-id;
+    in-out property <string> ss-secret;
+    in-out property <bool> ss-has-secret;
+    in-out property <bool> ss-verify-tls;
+    in-out property <string> ss-interval;
+    in-out property <int> ss-ssh-cred;
+    in-out property <int> ss-rdp-cred;
+    in-out property <bool> ss-opt-a: true;
+    in-out property <bool> ss-opt-b: true;
+    in property <[string]> ss-cred-names;
+    // Options window.
+    in-out property <int> o-theme;
+    in-out property <bool> o-auto-update;
+    in-out property <int> o-font;
+    in-out property <string> o-font-size;
+    in-out property <int> o-rdp-res;
+    in-out property <string> o-rdp-width;
+    in-out property <string> o-rdp-height;
+    // Connection settings of the entry (section "Connexion").
+    in-out property <int> e-section;
+    in-out property <int> er-res;
+    in-out property <string> er-width;
+    in-out property <string> er-height;
+    in-out property <int> er-depth;
+    in-out property <bool> er-multimon;
+    in-out property <bool> er-copy: true;
+    in-out property <bool> er-paste: true;
+    in-out property <bool> er-drives;
+    in-out property <bool> er-printers;
+    in-out property <int> er-audio;
+    in-out property <bool> er-console;
+    in-out property <int> er-security;
+    in-out property <bool> er-ignore-cert;
+    in-out property <bool> er-wallpaper;
+    in-out property <int> er-gw;
+    in-out property <string> er-gw-host;
+    in-out property <bool> er-gw-same: true;
+    in-out property <int> es-font;
+    in-out property <string> es-size;
+    in-out property <int> es-scheme;
+    in-out property <string> es-scrollback;
+    in-out property <string> es-keepalive;
+    in-out property <bool> es-agent;
+    in-out property <string> es-keyfile;
+    in property <[string]> term-font-names: ["Par défaut (Options)", "Consolas", "Cascadia Mono", "Lucida Console", "Courier New"];
+    in property <[string]> rdp-res-names: ["Par défaut (Options)", "Adapter à l'onglet", "Taille fixe", "Plein écran"];
+    callback pick-key-file();
     in-out property <string> f-title;
     in-out property <string> f-name;
     in-out property <int> f-parent;
@@ -323,6 +397,10 @@ export component AppWindow inherits Window {
     in-out property <string> c-totp;
     in-out property <string> c-notes;
     in-out property <string> confirm-text;
+    // Confirm button label ("" = "Supprimer").
+    in-out property <string> confirm-ok;
+    // Toggled when a native child window (RDP) is hidden, to repaint the area it covered.
+    in property <bool> native-flip;
     in-out property <int> q-kind;
     in-out property <string> q-host;
     in-out property <string> q-port;
@@ -348,6 +426,8 @@ export component AppWindow inherits Window {
     in-out property <int> active-tab: -1;
     in property <image> term-image;
     in property <string> session-banner;
+    in property <bool> session-closed;
+    callback reconnect-tab();
     in property <float> scale: 1;
 
     callback act(string);
@@ -428,10 +508,18 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 92px;
             background: Theme.bg-ribbon;
-            ScrollView {
+            ribbon-sv := ScrollView {
                 height: parent.height - 1px;
                 content-width: max(self.visible-width, ribbon-content.min-width);
                 content-height: self.visible-height;
+                // The mouse wheel scrolls the ribbon sideways when the window is too narrow.
+                Rectangle {
+                    TouchArea {
+                        scroll-event(e) => {
+                            ribbon-sv.content-x = max(ribbon-sv.visible-width - ribbon-sv.content-width, min(0px, ribbon-sv.content-x + e.delta-y + e.delta-x));
+                            accept
+                        }
+                    }
                 ribbon-content := HorizontalLayout {
             if root.rtab == 0: HorizontalLayout {
                 padding-left: 6px;
@@ -447,7 +535,7 @@ export component AppWindow inherits Window {
                         clicked => { root.act("open"); }
                     }
                     RbColumn {
-                        RbSmall { icon: @image-url("icons/circle-dot.svg"); label: "Ouvrir et enregistrer"; tint: #f85149; enabled: false; clicked => { root.act("record"); } }
+                        RbSmall { icon: @image-url("icons/circle-dot.svg"); label: "Ouvrir et enregistrer"; tint: #f85149; enabled: root.has-entry && root.entry-kind == "ssh"; clicked => { root.act("record"); } }
                         RbSmall { icon: @image-url("icons/activity.svg"); label: "Tester la connexion"; tint: #58a6ff; enabled: root.can-test; clicked => { root.act("test-connection"); } }
                         RbSmall { icon: @image-url("icons/plug-zap.svg"); label: "Connexion rapide"; tint: #e3b341; enabled: root.connected; clicked => { root.act("quick"); } }
                     }
@@ -519,6 +607,7 @@ export component AppWindow inherits Window {
                     title: "Suivi";
                     RbLarge { icon: @image-url("icons/history.svg"); label: "Journal d'activité"; tint: #58a6ff; enabled: root.server-mode; clicked => { root.act("audit"); } }
                     RbLarge { icon: @image-url("icons/film.svg"); label: "Enregistrements"; tint: #58a6ff; enabled: root.server-mode; clicked => { root.act("recordings"); } }
+                    RbLarge { icon: @image-url("icons/play.svg"); label: "Lire un enregistrement"; tint: #3fb950; clicked => { root.act("play-cast"); } }
                 }
                 RGroup {
                     title: "Mobile";
@@ -535,6 +624,7 @@ export component AppWindow inherits Window {
                 }
                 RGroup {
                     title: "Aide";
+                    RbLarge { icon: @image-url("icons/sliders-horizontal.svg"); label: "Options"; tint: #58a6ff; clicked => { root.act("options"); } }
                     RbLarge { icon: @image-url("icons/info.svg"); label: "À propos"; clicked => { root.act("about"); } }
                 }
             }
@@ -548,10 +638,12 @@ export component AppWindow inherits Window {
                 }
                 RGroup {
                     title: "Aide";
+                    RbLarge { icon: @image-url("icons/sliders-horizontal.svg"); label: "Options"; tint: #58a6ff; clicked => { root.act("options"); } }
                     RbLarge { icon: @image-url("icons/info.svg"); label: "À propos"; clicked => { root.act("about"); } }
                 }
             }
             }
+                }
                 }
             Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
         }
@@ -721,43 +813,141 @@ export component AppWindow inherits Window {
                             }
                             Rectangle { y: parent.height - 2px; height: 2px; background: root.active-tab < 0 ? Theme.accent : transparent; }
                         }
-                        for t[i] in root.tabs: Rectangle {
-                            width: min(240px, tab-lbl.preferred-width + 64px);
-                            background: root.active-tab == i ? Theme.bg : tab-ta.has-hover ? Theme.bg-hover : transparent;
-                            accessible-role: tab;
-                            accessible-label: t.title;
-                            accessible-action-default => { root.active-tab = i; root.tab-activated(i); }
-                            tab-ta := TouchArea {
-                                clicked => { root.active-tab = i; root.tab-activated(i); }
-                                pointer-event(e) => {
-                                    if (e.button == PointerEventButton.middle && e.kind == PointerEventKind.up) { root.tab-closed(i); }
+                        // Session tabs scroll horizontally when they overflow
+                        // (wheel, arrows, list of all tabs), like RDM.
+                        tab-strip := Rectangle {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            clip: true;
+                            property <length> nav-w: 76px;
+                            property <bool> crowded: tab-row.preferred-width > self.width;
+                            property <length> view-w: self.width - (self.crowded ? self.nav-w : 0px);
+                            property <length> overflow: self.crowded ? tab-row.preferred-width - self.view-w : 0px;
+                            property <length> scroll: 0px;
+                            function scroll-by(d: length) { self.scroll = max(0px, min(self.overflow, min(self.scroll, self.overflow) + d)); }
+                            function reveal(x: length, w: length) {
+                                if (x < self.scroll) { self.scroll = x; }
+                                else if (x + w > self.scroll + self.view-w) { self.scroll = x + w - self.view-w; }
+                            }
+                            TouchArea {
+                                scroll-event(e) => {
+                                    tab-strip.scroll-by(-(e.delta-y + e.delta-x));
+                                    accept
                                 }
                             }
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 4px;
-                                spacing: 6px;
-                                KindIcon { kind: t.kind; y: 8px; }
-                                Rectangle {
-                                    width: 7px;
-                                    StatusDot { status: t.state == "connected" ? 1 : t.state == "closed" ? 2 : 0; width: 7px; height: 7px; y: 13px; }
-                                }
-                                tab-lbl := Text { text: t.title; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
-                                Rectangle {
-                                    width: 22px;
-                                    border-radius: 3px;
-                                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
-                                    Ico { source: @image-url("icons/x.svg"); width: 13px; height: 13px; tint: Theme.muted; }
-                                    close-ta := TouchArea { clicked => { root.tab-closed(i); } }
+                            Flickable {
+                                interactive: false;
+                                content-width: max(tab-row.preferred-width, self.width);
+                                content-x: -min(tab-strip.scroll, tab-strip.overflow);
+                                tab-row := HorizontalLayout {
+                                    spacing: 2px;
+                                    alignment: start;
+                                    for t[i] in root.tabs: Rectangle {
+                                        property <bool> is-active: root.active-tab == i;
+                                        init => { if (self.is-active) { tab-strip.reveal(self.x, self.width); } }
+                                        changed is-active => { if (self.is-active) { tab-strip.reveal(self.x, self.width); } }
+                                        width: min(240px, tab-lbl.preferred-width + 64px);
+                                        background: root.active-tab == i ? Theme.bg : tab-ta.has-hover ? Theme.bg-hover : transparent;
+                                        accessible-role: tab;
+                                        accessible-label: t.title;
+                                        accessible-action-default => { root.active-tab = i; root.tab-activated(i); }
+                                        tab-ta := TouchArea {
+                                            clicked => { root.active-tab = i; root.tab-activated(i); }
+                                            pointer-event(e) => {
+                                                if (e.button == PointerEventButton.middle && e.kind == PointerEventKind.up) { root.tab-closed(i); }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 4px;
+                                            spacing: 6px;
+                                            KindIcon { kind: t.kind; y: 8px; }
+                                            Rectangle {
+                                                width: 7px;
+                                                StatusDot { status: t.state == "connected" ? 1 : t.state == "closed" ? 2 : 0; width: 7px; height: 7px; y: 13px; }
+                                            }
+                                            tab-lbl := Text { text: t.title; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                                            Rectangle {
+                                                width: 22px;
+                                                border-radius: 3px;
+                                                background: close-ta.has-hover ? Theme.bg-hover : transparent;
+                                                Ico { source: @image-url("icons/x.svg"); width: 13px; height: 13px; tint: Theme.muted; }
+                                                close-ta := TouchArea { clicked => { root.tab-closed(i); } }
+                                            }
+                                        }
+                                        Rectangle { y: parent.height - 2px; height: 2px; background: root.active-tab == i ? Theme.accent : transparent; }
+                                    }
                                 }
                             }
-                            Rectangle { y: parent.height - 2px; height: 2px; background: root.active-tab == i ? Theme.accent : transparent; }
+                            // Fade on the left edge when tabs are scrolled out of view.
+                            if min(tab-strip.scroll, tab-strip.overflow) > 0: Rectangle {
+                                x: 0;
+                                width: 28px;
+                                background: @linear-gradient(90deg, Theme.bg-panel 0%, Theme.bg-panel 40%, Theme.bg-panel.transparentize(100%) 100%);
+                                Rectangle { x: 0; width: 1px; background: Theme.border; }
+                            }
+                            if tab-strip.crowded: Rectangle {
+                                x: parent.width - tab-strip.nav-w;
+                                width: tab-strip.nav-w;
+                                background: Theme.bg-panel;
+                                HorizontalLayout {
+                                    spacing: 2px;
+                                    padding-left: 2px;
+                                    TabNavButton {
+                                        icon: @image-url("icons/chevron-left.svg");
+                                        label: "Onglets précédents";
+                                        enabled: min(tab-strip.scroll, tab-strip.overflow) > 0;
+                                        clicked => { tab-strip.scroll-by(-160px); }
+                                    }
+                                    TabNavButton {
+                                        icon: @image-url("icons/chevron-right.svg");
+                                        label: "Onglets suivants";
+                                        enabled: tab-strip.scroll < tab-strip.overflow;
+                                        clicked => { tab-strip.scroll-by(160px); }
+                                    }
+                                    tab-list-btn := TabNavButton {
+                                        icon: @image-url("icons/chevron-down.svg");
+                                        label: "Liste des onglets";
+                                        clicked => { tab-list.show(); }
+                                        tab-list := PopupWindow {
+                                            x: parent.width - 280px;
+                                            y: parent.height;
+                                            width: 280px;
+                                            height: min(root.tabs.length * 28px + 8px, 420px);
+                                            Rectangle {
+                                                background: Theme.bg-elev;
+                                                border-width: 1px;
+                                                border-color: Theme.border;
+                                                border-radius: 4px;
+                                                ListView {
+                                                    for t[i] in root.tabs: Rectangle {
+                                                        height: 28px;
+                                                        background: item-ta.has-hover ? Theme.bg-hover : root.active-tab == i ? Theme.bg : transparent;
+                                                        accessible-role: list-item;
+                                                        accessible-label: t.title;
+                                                        accessible-action-default => { root.active-tab = i; root.tab-activated(i); }
+                                                        item-ta := TouchArea { clicked => { root.active-tab = i; root.tab-activated(i); } }
+                                                        HorizontalLayout {
+                                                            padding-left: 10px;
+                                                            padding-right: 10px;
+                                                            spacing: 8px;
+                                                            KindIcon { kind: t.kind; y: 6px; }
+                                                            Text { text: t.title; vertical-alignment: center; overflow: elide; color: Theme.text; font-weight: root.active-tab == i ? 600 : 400; }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             if root.active-tab >= 0: session-pane := Rectangle {
                 vertical-stretch: 1;
-                background: #0c0c0c;
+                // Imperceptible change that marks the pane dirty after a native window was hidden.
+                background: root.native-flip ? #0c0c0d : #0c0c0c;
                 init => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
                 changed width => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
                 changed height => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
@@ -828,7 +1018,13 @@ export component AppWindow inherits Window {
                     y: parent.height - 34px;
                     height: 34px;
                     background: #1f2328e0;
-                    Text { text: root.session-banner; color: #f0f0f0; vertical-alignment: center; horizontal-alignment: center; }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        padding: 3px;
+                        Text { text: root.session-banner; color: #f0f0f0; vertical-alignment: center; overflow: elide; }
+                        if root.session-closed: Button { text: "Reconnecter"; primary: true; clicked => { root.reconnect-tab(); } }
+                    }
                 }
             }
             // Dashboard of the selected item
@@ -845,52 +1041,52 @@ export component AppWindow inherits Window {
                         color: Theme.muted;
                     }
                 }
-                if root.detail-title != "": VerticalLayout {
-                    padding: 22px;
-                    spacing: 14px;
-                    HorizontalLayout {
+                // The whole sheet scrolls, so long notes and attachments get the full height.
+                if root.detail-title != "": sheet-sv := ScrollView {
+                    content-width: self.visible-width;
+                    content-height: sheet-lay.preferred-height;
+                    sheet-lay := VerticalLayout {
+                        width: sheet-sv.visible-width;
+                        padding: 22px;
                         spacing: 14px;
-                        KindIcon { kind: root.detail-kind; width: 36px; height: 36px; }
-                        VerticalLayout {
-                            alignment: center;
-                            Text { text: root.detail-title; font-size: 22px; font-weight: 600; overflow: elide; color: Theme.text; }
-                            Text { text: root.detail-subtitle; color: Theme.muted; overflow: elide; }
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        if root.can-open: Button { text: root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session"; primary: true; clicked => { root.act("open"); } }
-                        if root.can-test: Button { text: "Tester la connexion"; clicked => { root.act("test-connection"); } }
-                        if root.can-edit: Button { text: "Modifier"; clicked => { root.act("edit"); } }
-                        if root.has-folder: Button { text: "Identifiants du dossier"; clicked => { root.act("folder-creds"); } }
-                        if root.has-folder: Button { text: "Disponibilité"; clicked => { root.act("availability"); } }
-                        if root.can-open-external: Button { text: "Ouvrir dans mstsc"; clicked => { root.open-external(); } }
-
-                    }
-                    Rectangle {
-                        background: Theme.bg-elev;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: Theme.border-soft;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 9px;
-                            for f in root.detail-fields: HorizontalLayout {
-                                spacing: 12px;
-                                Text { text: f.label; width: 170px; color: Theme.muted; }
-                                Text { text: f.value; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                        HorizontalLayout {
+                            spacing: 14px;
+                            KindIcon { kind: root.detail-kind; width: 36px; height: 36px; }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: root.detail-title; font-size: 22px; font-weight: 600; overflow: elide; color: Theme.text; }
+                                Text { text: root.detail-subtitle; color: Theme.muted; overflow: elide; }
                             }
                         }
-                    }
-                    notes-sv := ScrollView {
-                        vertical-stretch: 1;
-                        content-width: self.visible-width;
-                        content-height: notes-lay.preferred-height;
-                        notes-lay := VerticalLayout {
-                            width: notes-sv.visible-width - 6px;
+                        HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
+                            if root.can-open: Button { text: root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session"; primary: true; clicked => { root.act("open"); } }
+                            if root.can-test: Button { text: "Tester la connexion"; clicked => { root.act("test-connection"); } }
+                            if root.can-edit: Button { text: "Modifier"; clicked => { root.act("edit"); } }
+                            if root.has-folder: Button { text: "Identifiants du dossier"; clicked => { root.act("folder-creds"); } }
+                            if root.has-folder: Button { text: "Disponibilité"; clicked => { root.act("availability"); } }
+                            if root.can-open-external: Button { text: "Ouvrir dans mstsc"; clicked => { root.open-external(); } }
+
+                        }
+                        Rectangle {
+                            background: Theme.bg-elev;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.border-soft;
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 9px;
+                                for f in root.detail-fields: HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: f.label; width: 170px; color: Theme.muted; }
+                                    Text { text: f.value; overflow: elide; horizontal-stretch: 1; color: Theme.text; }
+                                }
+                            }
+                        }
+                        notes-lay := VerticalLayout {
+                            padding-top: 4px;
+                            spacing: 8px;
                             if root.has-entry: HorizontalLayout {
                                 spacing: 10px;
                                 Text { text: "Notes"; font-weight: 600; color: Theme.text; vertical-alignment: center; }
@@ -915,7 +1111,15 @@ export component AppWindow inherits Window {
                                 if b.kind == "li": HorizontalLayout {
                                     padding-left: 4px + b.depth * 18px;
                                     spacing: 6px;
-                                    Text { text: b.marker; color: Theme.muted; min-width: 16px; }
+                                    if b.marker == "☐" || b.marker == "☑": VerticalLayout {
+                                        alignment: start;
+                                        padding-top: 1px;
+                                        Ico {
+                                            source: b.marker == "☑" ? @image-url("icons/square-check.svg") : @image-url("icons/square.svg");
+                                            tint: b.marker == "☑" ? #3fb950 : Theme.muted;
+                                        }
+                                    }
+                                    if b.marker != "☐" && b.marker != "☑": Text { text: b.marker; color: Theme.muted; min-width: 16px; }
                                     StyledText {
                                         horizontal-stretch: 1;
                                         text: b.text;
@@ -1049,7 +1253,7 @@ export component AppWindow inherits Window {
             LineEdit { text <=> root.cmd-timeout; width: 70px; input-type: number; }
             Rectangle { horizontal-stretch: 1; }
             Button { text: "Arrêter"; enabled: root.cmd-running; clicked => { root.act("cmd-stop"); } }
-            Button { text: "Relancer les échecs"; enabled: !root.cmd-running && root.cmd-summary != ""; clicked => { root.act("cmd-retry"); } }
+            Button { text: "Relancer les échecs"; enabled: !root.cmd-running && root.cmd-retryable; clicked => { root.act("cmd-retry"); } }
         }
         Text { text: root.cmd-summary; color: Theme.text; font-size: 12px; }
         HorizontalLayout {
@@ -1163,7 +1367,11 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            for a[i] in root.adm-actions: Button { text: a; enabled: !root.busy; clicked => { root.act("adm-" + i); } }
+            for a[i] in root.adm-actions: Button {
+                text: a.label;
+                enabled: !root.busy && (!a.needs-selection || (root.adm-selected >= 0 && root.adm-selected < root.adm-rows.length));
+                clicked => { root.act("adm-" + i); }
+            }
         }
     }
 
@@ -1494,8 +1702,10 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.dialog == "entry": Dialog {
-        title: root.e-title;
+
+
+    if root.dialog == "sync-src": Dialog {
+        title: root.ss-title;
         error: root.dialog-error;
         busy: root.busy;
         ok-text: "Enregistrer";
@@ -1504,22 +1714,151 @@ export component AppWindow inherits Window {
         cancel => { root.cancel-dialog(); }
         HorizontalLayout {
             spacing: 10px;
-            FormRow { label: "Nom"; horizontal-stretch: 2; LineEdit { text <=> root.e-name; } }
-            FormRow { label: "Protocole"; horizontal-stretch: 1; ComboBox { model: root.kind-names; current-index <=> root.e-kind; } }
+            FormRow { label: "Nom"; horizontal-stretch: 2; LineEdit { text <=> root.ss-name; } }
+            FormRow { label: "Type"; horizontal-stretch: 1; ComboBox { model: ["Proxmox VE", "NetBox"]; current-index <=> root.ss-kind; } }
         }
-        if root.e-kind != 3: HorizontalLayout {
-            spacing: 10px;
-            FormRow { label: "Hôte"; horizontal-stretch: 3; LineEdit { text <=> root.e-host; placeholder-text: "serveur.lan ou 10.0.0.5"; } }
-            FormRow { label: "Port"; horizontal-stretch: 1; LineEdit { text <=> root.e-port; input-type: number; } }
+        FormRow { label: "URL"; LineEdit { text <=> root.ss-url; placeholder-text: root.ss-kind == 0 ? "https://pve.lan:8006" : "https://netbox.lan"; } }
+        if root.ss-kind == 0: FormRow { label: "Identifiant du jeton (utilisateur@royaume!jeton)"; LineEdit { text <=> root.ss-token-id; placeholder-text: "relay@pve!sync"; } }
+        FormRow {
+            label: root.ss-has-secret ? "Secret du jeton (laisser vide pour conserver l'actuel)" : (root.ss-kind == 0 ? "Secret du jeton (UUID)" : "Jeton d'API NetBox");
+            LineEdit { text <=> root.ss-secret; input-type: password; }
         }
-        if root.e-kind == 3: FormRow { label: "URL"; LineEdit { text <=> root.e-url; placeholder-text: "https://…"; } }
         HorizontalLayout {
             spacing: 10px;
-            FormRow { label: "Utilisateur (si pas d'identifiant)"; horizontal-stretch: 1; LineEdit { text <=> root.e-username; } }
-            FormRow { label: "Identifiant du coffre"; horizontal-stretch: 1; ComboBox { model: root.credential-names; current-index <=> root.e-cred; } }
+            FormRow { label: "Synchronisation automatique (minutes, 0 = manuelle)"; horizontal-stretch: 1; LineEdit { text <=> root.ss-interval; input-type: number; placeholder-text: "0"; } }
+            VerticalLayout { alignment: end; CheckBox { text: "Vérifier le certificat TLS"; checked <=> root.ss-verify-tls; } }
         }
-        FormRow { label: "Dossier"; ComboBox { model: root.folder-names; current-index <=> root.e-folder; } }
-        FormRow { label: "Notes"; TextEdit { text <=> root.e-notes; height: 90px; wrap: word-wrap; } }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Identifiant des entrées SSH"; horizontal-stretch: 1; ComboBox { model: root.ss-cred-names; current-index <=> root.ss-ssh-cred; } }
+            FormRow { label: "Identifiant des entrées RDP"; horizontal-stretch: 1; ComboBox { model: root.ss-cred-names; current-index <=> root.ss-rdp-cred; } }
+        }
+        CheckBox { text: root.ss-kind == 0 ? "Entrées des invités (VM et conteneurs : SSH / RDP)" : "Équipements"; checked <=> root.ss-opt-a; }
+        CheckBox { text: root.ss-kind == 0 ? "Entrées des nœuds (SSH et interface web)" : "Machines virtuelles"; checked <=> root.ss-opt-b; }
+    }
+    if root.dialog == "options": Dialog {
+        title: "Options";
+        error: root.dialog-error;
+        ok-text: "Enregistrer";
+        card-width: 520px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        Text { text: "Général"; font-weight: 600; color: Theme.text; }
+        FormRow { label: "Thème"; ComboBox { model: ["Sombre", "Clair"]; current-index <=> root.o-theme; } }
+        CheckBox { text: "Rechercher les mises à jour au démarrage (une fois par jour)"; checked <=> root.o-auto-update; }
+        Text { text: "Terminal SSH (par défaut, chaque entrée peut le changer)"; font-weight: 600; color: Theme.text; }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Police"; horizontal-stretch: 2; ComboBox { model: ["Consolas", "Cascadia Mono", "Lucida Console", "Courier New"]; current-index <=> root.o-font; } }
+            FormRow { label: "Taille (6 à 48)"; horizontal-stretch: 1; LineEdit { text <=> root.o-font-size; input-type: number; placeholder-text: "14"; } }
+        }
+        Text { text: "Sessions RDP (par défaut)"; font-weight: 600; color: Theme.text; }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Résolution"; horizontal-stretch: 2; ComboBox { model: ["Adapter à l'onglet", "Taille fixe", "Plein écran"]; current-index <=> root.o-rdp-res; } }
+            if root.o-rdp-res == 1: FormRow { label: "Largeur"; horizontal-stretch: 1; LineEdit { min-width: 64px; text <=> root.o-rdp-width; input-type: number; placeholder-text: "1920"; } }
+            if root.o-rdp-res == 1: FormRow { label: "Hauteur"; horizontal-stretch: 1; LineEdit { min-width: 64px; text <=> root.o-rdp-height; input-type: number; placeholder-text: "1080"; } }
+        }
+    }
+    if root.dialog == "entry": Dialog {
+        title: root.e-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 640px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        if root.e-kind <= 1: HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Button { text: "Général"; primary: root.e-section == 0; clicked => { root.e-section = 0; } }
+            Button { text: root.e-kind == 0 ? "Connexion RDP" : "Terminal SSH"; primary: root.e-section == 1; clicked => { root.e-section = 1; } }
+        }
+        if root.e-section == 1 && root.e-kind == 0: VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Résolution"; horizontal-stretch: 2; ComboBox { model: root.rdp-res-names; current-index <=> root.er-res; } }
+                if root.er-res == 2: FormRow { label: "Largeur"; horizontal-stretch: 1; LineEdit { min-width: 64px; text <=> root.er-width; input-type: number; placeholder-text: "1920"; } }
+                if root.er-res == 2: FormRow { label: "Hauteur"; horizontal-stretch: 1; LineEdit { min-width: 64px; text <=> root.er-height; input-type: number; placeholder-text: "1080"; } }
+                FormRow { label: "Couleurs"; horizontal-stretch: 1; ComboBox { model: ["Par défaut (32 bits)", "15 bits", "16 bits", "24 bits", "32 bits"]; current-index <=> root.er-depth; } }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Son"; horizontal-stretch: 1; ComboBox { model: ["Sur ce poste", "Sur l'ordinateur distant", "Désactivé"]; current-index <=> root.er-audio; } }
+                FormRow { label: "Sécurité"; horizontal-stretch: 1; ComboBox { model: ["Automatique", "NLA", "TLS", "RDP"]; current-index <=> root.er-security; } }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    CheckBox { text: "Copier depuis la session"; checked <=> root.er-copy; }
+                    CheckBox { text: "Coller dans la session"; checked <=> root.er-paste; }
+                    CheckBox { text: "Lecteurs locaux"; checked <=> root.er-drives; }
+                    CheckBox { text: "Imprimantes"; checked <=> root.er-printers; }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    CheckBox { text: "Session d'administration (console)"; checked <=> root.er-console; }
+                    CheckBox { text: "Multi-écran (plein écran)"; checked <=> root.er-multimon; enabled: root.er-res == 3 || root.er-res == 0; }
+                    CheckBox { text: "Fond d'écran"; checked <=> root.er-wallpaper; }
+                    CheckBox { text: "Ignorer les erreurs de certificat"; checked <=> root.er-ignore-cert; }
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Passerelle RD"; horizontal-stretch: 1; ComboBox { model: ["Aucune", "Toujours", "Sauf adresses locales"]; current-index <=> root.er-gw; } }
+                if root.er-gw > 0: FormRow { label: "Hôte de la passerelle"; horizontal-stretch: 2; LineEdit { text <=> root.er-gw-host; placeholder-text: "rdgw.exemple.fr"; } }
+            }
+            if root.er-gw > 0: CheckBox { text: "Mêmes identifiants pour la passerelle"; checked <=> root.er-gw-same; }
+        }
+        if root.e-section == 1 && root.e-kind == 1: VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Police"; horizontal-stretch: 2; ComboBox { model: root.term-font-names; current-index <=> root.es-font; } }
+                FormRow { label: "Taille (6 à 48)"; horizontal-stretch: 1; LineEdit { text <=> root.es-size; input-type: number; placeholder-text: "Options"; } }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Couleurs"; horizontal-stretch: 2; ComboBox { model: ["Gris sur noir", "Vert sur noir", "Blanc sur noir", "Noir sur blanc"]; current-index <=> root.es-scheme; } }
+                FormRow { label: "Historique (lignes)"; horizontal-stretch: 1; LineEdit { text <=> root.es-scrollback; input-type: number; placeholder-text: "5000"; } }
+                FormRow { label: "Keepalive (s, 0 = aucun)"; horizontal-stretch: 1; LineEdit { text <=> root.es-keepalive; input-type: number; placeholder-text: "30"; } }
+            }
+            CheckBox { text: "Essayer les clés de l'agent SSH (OpenSSH pour Windows, puis Pageant)"; checked <=> root.es-agent; }
+            HorizontalLayout {
+                spacing: 6px;
+                FormRow {
+                    label: "Fichier de clé privée sur ce poste (si l'identifiant n'a pas de clé)";
+                    horizontal-stretch: 1;
+                    LineEdit { text <=> root.es-keyfile; placeholder-text: "C:\\Users\\…\\.ssh\\id_ed25519"; }
+                }
+                VerticalLayout { alignment: end; Button { text: "Parcourir…"; clicked => { root.pick-key-file(); } } }
+            }
+        }
+        if root.e-section == 0 || root.e-kind > 1: VerticalLayout {
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Nom"; horizontal-stretch: 2; LineEdit { text <=> root.e-name; } }
+                FormRow { label: "Protocole"; horizontal-stretch: 1; ComboBox { model: root.kind-names; current-index <=> root.e-kind; } }
+            }
+            if root.e-kind != 3: HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Hôte"; horizontal-stretch: 3; LineEdit { text <=> root.e-host; placeholder-text: "serveur.lan ou 10.0.0.5"; } }
+                FormRow { label: "Port"; horizontal-stretch: 1; LineEdit { text <=> root.e-port; input-type: number; } }
+            }
+            if root.e-kind == 3: FormRow { label: "URL"; LineEdit { text <=> root.e-url; placeholder-text: "https://…"; } }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Utilisateur (si pas d'identifiant)"; horizontal-stretch: 1; LineEdit { text <=> root.e-username; } }
+                FormRow { label: "Identifiant du coffre"; horizontal-stretch: 1; ComboBox { model: root.credential-names; current-index <=> root.e-cred; } }
+            }
+            FormRow { label: "Dossier"; ComboBox { model: root.folder-names; current-index <=> root.e-folder; } }
+            FormRow { label: "Notes"; TextEdit { text <=> root.e-notes; height: 90px; wrap: word-wrap; } }
+        }
     }
 
     if root.dialog == "folder": Dialog {
@@ -1599,7 +1938,7 @@ export component AppWindow inherits Window {
         title: "Confirmer";
         error: root.dialog-error;
         busy: root.busy;
-        ok-text: "Supprimer";
+        ok-text: root.confirm-ok != "" ? root.confirm-ok : "Supprimer";
         card-width: 420px;
         ok => { root.submit-dialog(); }
         cancel => { root.cancel-dialog(); }

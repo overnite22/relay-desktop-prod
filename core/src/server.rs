@@ -278,6 +278,17 @@ impl DataSource for ServerSource {
             .map(Option::unwrap_or_default)
     }
 
+    fn save_sync_source(&self, id: Option<&str>, input: &crate::admin::SyncSourceInput) -> Result<SyncSource> {
+        match id {
+            Some(id) => self.call("PUT", &format!("/api/sources/{}", seg(id)), Some(input)),
+            None => self.call("POST", "/api/sources", Some(input)),
+        }
+    }
+
+    fn delete_sync_source(&self, id: &str) -> Result<()> {
+        self.send("DELETE", &format!("/api/sources/{}", seg(id)), None::<&()>).map(|_| ())
+    }
+
     fn test_sync_source(&self, id: &str) -> Result<Outcome> {
         self.call("POST", &format!("/api/sources/{}/test", seg(id)), None::<&()>)
     }

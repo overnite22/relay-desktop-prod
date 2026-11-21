@@ -13,9 +13,66 @@ pub struct SyncSource {
     pub kind: String,
     pub name: String,
     pub url: String,
+    pub token_id: String,
+    pub has_secret: bool,
+    pub verify_tls: bool,
+    /// `sshCredentialId`, `rdpCredentialId`, `guestEntries`, `nodeEntries`, `devices`, `vms`.
+    #[serde(deserialize_with = "crate::model::nullable")]
+    pub options: serde_json::Map<String, serde_json::Value>,
     pub interval_min: i64,
     pub last_sync_at: Option<String>,
     pub last_status: String,
+}
+
+impl SyncSource {
+    /// Boolean option, `true` when absent (server rule).
+    pub fn option_on(&self, key: &str) -> bool {
+        self.options.get(key).and_then(serde_json::Value::as_bool).unwrap_or(true)
+    }
+
+    pub fn option_str(&self, key: &str) -> &str {
+        self.options.get(key).and_then(serde_json::Value::as_str).unwrap_or("")
+    }
+}
+
+/// Exact body of `POST /api/sources` and `PUT /api/sources/{id}` (unknown
+/// fields are refused). `secret: None` keeps the stored secret.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSourceInput {
+    pub kind: String,
+    pub name: String,
+    pub url: String,
+    pub token_id: String,
+    pub secret: Option<String>,
+    pub verify_tls: bool,
+    pub options: serde_json::Map<String, serde_json::Value>,
+    pub interval_min: i64,
+}
+
+impl SyncSourceInput {
+    /// Checks the rules of the server before sending.
+    pub fn validate(&self, creating: bool) -> std::result::Result<(), String> {
+        if self.kind != "proxmox" && self.kind != "netbox" {
+            return Err("type de source inconnu".into());
+        }
+        if self.name.trim().is_empty() {
+            return Err("le nom de la source est obligatoire".into());
+        }
+        if !(self.url.starts_with("https://") || self.url.starts_with("http://")) {
+            return Err("l'URL doit commencer par https:// ou http://".into());
+        }
+        if self.kind == "proxmox" && !self.token_id.contains('!') {
+            return Err("identifiant de jeton Proxmox attendu au format utilisateur@royaume!nom-du-jeton".into());
+        }
+        if !(0..=7 * 24 * 60).contains(&self.interval_min) {
+            return Err("intervalle de synchronisation invalide (0 à 10080 minutes)".into());
+        }
+        if creating && self.secret.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return Err("le secret du jeton d'API est obligatoire".into());
+        }
+        Ok(())
+    }
 }
 
 /// Answer of the test and sync endpoints.

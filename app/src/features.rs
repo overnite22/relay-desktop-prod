@@ -282,6 +282,7 @@ pub fn act(ui: &AppWindow, id: &str) {
                 },
             );
         }
+        "options" => connopts::open_options(ui),
         "dark" | "light" => {
             ui.set_dark_mode(id == "dark");
             with(|s| {
@@ -440,6 +441,7 @@ pub fn act(ui: &AppWindow, id: &str) {
                 s.pending = Pending::DeleteCredential(c.id.clone());
                 s.back_to_creds = true;
             });
+            ui.set_confirm_ok("".into());
             ui.set_confirm_text(format!("Supprimer définitivement l'identifiant « {} » ?", c.name).into());
             ui.set_dialog_error("".into());
             ui.set_dialog("confirm".into());
@@ -533,7 +535,8 @@ pub fn act(ui: &AppWindow, id: &str) {
                 },
             );
         }
-        "record" => web_page(ui, "Ouvrir et enregistrer"),
+        "record" => recorder::record(ui),
+        "play-cast" => recorder::play(ui),
         "devices" => web_page(ui, "Appareils"),
         _ => {}
     }
@@ -582,6 +585,8 @@ fn load_workspaces(ui: &AppWindow, open: bool) {
 pub fn submit(ui: &AppWindow) -> bool {
     match ui.get_dialog().as_str() {
         "quick" => submit_quick(ui),
+        "options" => connopts::submit_options(ui),
+        "sync-src" => admin::submit_source(ui),
         "folder-creds" => {
             let (Some(src), Some(f)) = (source(), with(|s| current_folder(s))) else {
                 return true;
@@ -804,7 +809,13 @@ fn submit_quick(ui: &AppWindow) {
 
 /// Asks for confirmation, then runs `then` (which closes or replaces the dialog).
 pub fn confirm(ui: &AppWindow, text: String, then: impl FnOnce(&AppWindow) + 'static) {
+    confirm_as(ui, text, "", then);
+}
+
+/// Same as [`confirm`] with the label of the confirm button ("" = "Supprimer").
+pub fn confirm_as(ui: &AppWindow, text: String, ok: &str, then: impl FnOnce(&AppWindow) + 'static) {
     with(|s| s.pending = Pending::Run(Box::new(then)));
+    ui.set_confirm_ok(ok.into());
     ui.set_confirm_text(text.into());
     ui.set_dialog_error("".into());
     ui.set_dialog("confirm".into());

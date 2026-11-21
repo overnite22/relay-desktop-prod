@@ -24,7 +24,8 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false }
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi"] }
+windows-core = "0.61"
 
 [build-dependencies]
 slint-build = "1"

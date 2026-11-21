@@ -4,15 +4,18 @@
 
 mod admin;
 mod bulk;
+mod connopts;
 mod features;
 mod notes;
 mod pve;
 mod rdp;
+mod recorder;
 mod session;
 mod settings;
 mod term;
 mod update;
 
+use relay_desktop_core::conn::{RdpOptions, Resolution, SshOptions};
 use relay_desktop_core::ssh;
 use relay_desktop_core::{
     effective_credential, pairing, Credential, CredentialInput, DataSource, Entry, Error, Folder, Kind, LocalSource, SecretField,
@@ -50,7 +53,15 @@ enum Pending {
 }
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static FONTS: OnceLock<Option<Arc<term::Fonts>>> = OnceLock::new();
+type FontCache = std::collections::HashMap<String, Option<Arc<term::Fonts>>>;
+static FONTS: OnceLock<Mutex<FontCache>> = OnceLock::new();
+
+/// Terminal fonts loaded once per Windows font file.
+fn fonts(file: &str) -> Option<Arc<term::Fonts>> {
+    let cache = FONTS.get_or_init(Default::default);
+    let mut cache = cache.lock().unwrap();
+    cache.entry(file.to_string()).or_insert_with(|| term::Fonts::load(file)).clone()
+}
 
 fn rt() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
@@ -75,6 +86,12 @@ struct Session {
     input: Option<tokio::sync::mpsc::UnboundedSender<ssh::Input>>,
     rdp: Option<rdp::RdpSession>,
     pve: Option<pve::Console>,
+    /// Terminal font size in logical pixels (SSH tabs).
+    pt: f32,
+    /// asciicast recording of an SSH tab ("Ouvrir et enregistrer").
+    rec: Option<recorder::Recorder>,
+    /// Replay of a recording.
+    player: Option<recorder::Player>,
 }
 
 struct RdpCreds {
@@ -109,6 +126,10 @@ struct State {
     term_area: (f32, f32),
     session_area: (f32, f32, f32, f32),
     rdp_rect: (i32, i32, i32, i32),
+    /// Session tab replaced by the next opened session ("Reconnecter").
+    replace_tab: Option<u64>,
+    /// The next SSH session is recorded.
+    record_next: bool,
     settings: Settings,
     source: Option<Arc<dyn DataSource>>,
     tree: Tree,
@@ -148,6 +169,7 @@ fn bg<T: Send + 'static>(
 ) {
     ui.set_busy(true);
     ui.set_status(status.into());
+    let status = SharedString::from(status);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let result = work();
@@ -155,6 +177,10 @@ fn bg<T: Send + 'static>(
             if let Some(ui) = weak.upgrade() {
                 ui.set_busy(false);
                 done(&ui, result);
+                // A finished load must not stay displayed as "in progress".
+                if ui.get_status() == status {
+                    ui.set_status("".into());
+                }
             }
         });
     });
@@ -326,10 +352,7 @@ fn update_detail(ui: &AppWindow) {
                         fields.push(field("Origine", "Synchronisée (NetBox/Proxmox), lecture seule"));
                     }
                     if !e.updated_at.is_empty() {
-                        fields.push(field(
-                            "Modifiée le",
-                            e.updated_at.replace('T', " ").chars().take(19).collect::<String>(),
-                        ));
+                        fields.push(field("Modifiée le", relay_desktop_core::model::local_time(&e.updated_at, true)));
                     }
                     (
                         e.kind.as_str(),
@@ -571,6 +594,7 @@ fn open_entry_dialog(ui: &AppWindow, entry: Option<Entry>) {
     ui.set_e_cred(ci);
     ui.set_e_folder(fi);
     ui.set_e_notes(e.notes.clone().into());
+    connopts::load(ui, &e);
     ui.set_dialog_error("".into());
     ui.set_dialog("entry".into());
 }
@@ -618,6 +642,7 @@ fn close_dialog(ui: &AppWindow) {
         AppWindow::set_c_password,
         AppWindow::set_c_totp,
         AppWindow::set_q_password,
+        AppWindow::set_ss_secret,
     ] {
         clear(ui, "".into());
     }
@@ -689,6 +714,9 @@ fn submit(ui: &AppWindow) {
             e.notes = ui.get_e_notes().into();
             e.folder_id = folder;
             e.credential_id = cred;
+            if let Err(msg) = connopts::store(ui, &mut e) {
+                return fail(ui, msg);
+            }
             bg(
                 ui,
                 "Enregistrement…",
@@ -907,16 +935,38 @@ fn expand_to(s: &mut State, folder: &str) {
 }
 
 fn open_session(ui: &AppWindow, external: bool) {
+    let Some(id) = with(|s| match &s.current {
+        Some(Sel::Entry(id)) => Some(id.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    launch(ui, &id, external);
+}
+
+/// "Reconnecter" on a closed tab: opens the entry again in the same tab.
+fn reconnect_tab(ui: &AppWindow) {
+    let Some((id, entry_id)) = active_session(ui, |x| (x.id, x.entry_id.clone())) else {
+        return;
+    };
+    if entry_id.is_empty() || !with(|s| s.tree.entries.iter().any(|e| e.id == entry_id)) {
+        ui.set_status("Reconnexion impossible : connexion rapide ou entrée supprimée, rouvrez-la depuis le ruban.".into());
+        return;
+    }
+    with(|s| s.replace_tab = Some(id));
+    launch(ui, &entry_id, false);
+}
+
+/// Opens the entry `id` (tab, external client or browser).
+fn launch(ui: &AppWindow, id: &str, external: bool) {
     let Some(src) = source() else { return };
-    let Some((entry, tree, creds)) = with(|s| match &s.current {
-        Some(Sel::Entry(id)) => s
-            .tree
+    let Some((entry, tree, creds)) = with(|s| {
+        s.tree
             .entries
             .iter()
-            .find(|e| &e.id == id)
+            .find(|e| e.id == id)
             .cloned()
-            .map(|e| (e, s.tree.clone(), s.creds.clone())),
-        _ => None,
+            .map(|e| (e, s.tree.clone(), s.creds.clone()))
     }) else {
         return;
     };
@@ -977,7 +1027,13 @@ fn open_session(ui: &AppWindow, external: bool) {
             Ok(Launch::Ssh(c)) => open_ssh(ui, &launched, c),
             Ok(Launch::Rdp(c)) => open_rdp(ui, &launched, c),
             Ok(Launch::Pve(c)) => open_pve(ui, &launched, c),
-            Err(e) => ui.set_status(format!("Ouverture impossible : {e}").into()),
+            Err(e) => {
+                with(|s| {
+                    s.replace_tab = None;
+                    s.record_next = false;
+                });
+                ui.set_status(format!("Ouverture impossible : {e}").into());
+            }
         },
     );
 }
@@ -990,24 +1046,39 @@ fn open_pve(ui: &AppWindow, entry: &Entry, ticket: relay_desktop_core::source::P
     let w = ui.as_weak();
     let console = pve::spawn(ticket, move |state, banner| session_event(w.clone(), id, state, banner));
     let index = with(|s| {
-        s.sessions.push(Session {
-            id,
-            entry_id: entry.id.clone(),
-            title: entry.name.clone(),
-            icon: "pve",
-            state: "connecting",
-            banner: "Connexion console Proxmox…".into(),
-            kind: "pve",
-            term: None,
-            input: None,
-            rdp: None,
-            pve: Some(console),
-        });
-        s.sessions.len() as i32 - 1
+        add_session(
+            s,
+            Session {
+                id,
+                entry_id: entry.id.clone(),
+                title: entry.name.clone(),
+                icon: "pve",
+                state: "connecting",
+                banner: "Connexion console Proxmox…".into(),
+                kind: "pve",
+                term: None,
+                input: None,
+                rdp: None,
+                pve: Some(console),
+                pt: 0.0,
+                rec: None,
+                player: None,
+            },
+        )
     });
     show_tabs(ui);
     ui.set_active_tab(index);
     redraw(ui);
+}
+
+/// Adds a session tab, or replaces the tab being reconnected; returns its index.
+fn add_session(s: &mut State, session: Session) -> i32 {
+    if let Some(i) = s.replace_tab.take().and_then(|id| s.sessions.iter().position(|x| x.id == id)) {
+        s.sessions[i] = session;
+        return i as i32;
+    }
+    s.sessions.push(session);
+    s.sessions.len() as i32 - 1
 }
 
 fn show_tabs(ui: &AppWindow) {
@@ -1038,30 +1109,42 @@ fn redraw(ui: &AppWindow) {
                 .or_else(|| x.term.as_ref().map(|t| t.lock().unwrap().render())),
             x.banner.clone(),
             x.kind,
+            x.state == "closed",
         )
     });
-    if let Some((buf, banner, kind)) = frame {
+    if let Some((buf, banner, kind, closed)) = frame {
         if let Some(buf) = buf {
             ui.set_term_image(slint::Image::from_rgba8(buf));
         } else {
             ui.set_term_image(slint::Image::default());
         }
         ui.set_session_banner(banner.into());
+        ui.set_session_closed(closed);
         ui.set_active_kind(kind.into());
     }
 }
 
-/// Fits the active terminal to the visible area and tells the server.
+/// Fits the active terminal to the visible area and tells the server; the
+/// font follows the scale factor (moving the window to another monitor).
 fn fit_terminal(ui: &AppWindow) {
     let (w, h) = with(|s| s.term_area);
     let scale = ui.window().scale_factor();
+    if ui.get_scale() != scale {
+        ui.set_scale(scale);
+    }
     active_session(ui, |x| {
-        let (Some(term), Some(input)) = (&x.term, &x.input) else { return };
+        let Some(term) = &x.term else { return };
         let mut t = term.lock().unwrap();
+        t.set_px((x.pt * scale).round());
+        // Replays keep the size of the recording.
+        let Some(input) = &x.input else { return };
         let (rows, cols) = t.grid_for(w * scale - 8.0 * scale, h * scale - 8.0 * scale);
         if (rows, cols) != t.size() {
             t.resize(rows, cols);
             let _ = input.send(ssh::Input::Resize(cols, rows));
+            if let Some(r) = &x.rec {
+                r.resize(cols, rows);
+            }
         }
     });
     redraw(ui);
@@ -1087,13 +1170,32 @@ fn session_event(weak: slint::Weak<AppWindow>, id: u64, state: &'static str, ban
 }
 
 fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
-    let Some(fonts) = FONTS.get_or_init(term::Fonts::load).clone() else {
+    let opts = SshOptions::from_settings(&entry.settings);
+    let (font, pt) = with(|s| {
+        let font = Some(opts.font_name.clone())
+            .filter(|f| !f.is_empty())
+            .or_else(|| s.settings.term_font.clone())
+            .unwrap_or_default();
+        let size = if opts.font_size > 0 {
+            opts.font_size
+        } else {
+            s.settings.term_font_size
+        };
+        (font, if (6..=48).contains(&size) { size as f32 } else { 14.0 })
+    });
+    let Some(fonts) = fonts(SshOptions::font_file(&font)) else {
         ui.set_status("Police à chasse fixe introuvable (Consolas).".into());
         return;
     };
     let scale = ui.window().scale_factor();
     ui.set_scale(scale);
-    let term = Arc::new(Mutex::new(term::Term::new(fonts, (14.0 * scale).round(), 30, 100)));
+    let (fg, bg) = opts.colors();
+    let style = term::Style {
+        fg,
+        bg,
+        scrollback: if opts.scrollback > 0 { opts.scrollback as usize } else { 5000 },
+    };
+    let term = Arc::new(Mutex::new(term::Term::new(fonts, (pt * scale).round(), 30, 100, style)));
     let redraw_flag = Arc::new(AtomicBool::new(false));
     let id = with(|s| {
         s.next_session += 1;
@@ -1109,11 +1211,30 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
         cols: 100,
         rows: 30,
         known_hosts: settings::dir().join("known_hosts.json"),
+        keepalive: opts.keepalive_secs(),
+        agent: opts.agent,
+        key_file: Some(opts.key_file.trim()).filter(|f| !f.is_empty()).map(PathBuf::from),
     };
     let (weak, t2, flag) = (ui.as_weak(), term.clone(), redraw_flag.clone());
+    // "Ouvrir et enregistrer": asciicast file next to the settings.
+    let recorder = if with(|s| std::mem::take(&mut s.record_next)) {
+        match recorder::create(&entry.name, 100, 30) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                ui.set_status(format!("Enregistrement impossible : {e}").into());
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let rec2 = recorder.clone();
     let input = ssh::spawn(rt().handle(), params, move |ev| match ev {
         ssh::Event::Data(d) => {
             t2.lock().unwrap().feed(&d);
+            if let Some(r) = &rec2 {
+                r.output(&d);
+            }
             if !flag.swap(true, Ordering::AcqRel) {
                 let (weak, flag) = (weak.clone(), flag.clone());
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1139,6 +1260,9 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
                 Some(e) => format!("Déconnecté : {e}"),
                 None => "Session terminée".to_string(),
             };
+            if let Some(r) = &rec2 {
+                r.finish();
+            }
             session_event(weak.clone(), id, "closed", msg);
         }
     });
@@ -1147,21 +1271,30 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
     } else {
         format!("{} ({})", entry.name, c.username)
     };
+    let title = match &recorder {
+        Some(_) => format!("● {title}"),
+        None => title,
+    };
     let index = with(|s| {
-        s.sessions.push(Session {
-            id,
-            title,
-            icon: "ssh",
-            entry_id: entry.id.clone(),
-            state: "connecting",
-            banner: format!("Connexion à {}:{}…", entry.host, entry.port),
-            kind: "ssh",
-            term: Some(term),
-            input: Some(input),
-            rdp: None,
-            pve: None,
-        });
-        s.sessions.len() as i32 - 1
+        add_session(
+            s,
+            Session {
+                id,
+                title,
+                icon: "ssh",
+                entry_id: entry.id.clone(),
+                state: "connecting",
+                banner: format!("Connexion à {}:{}…", entry.host, entry.port),
+                kind: "ssh",
+                term: Some(term),
+                input: Some(input),
+                rdp: None,
+                pve: None,
+                pt,
+                rec: recorder,
+                player: None,
+            },
+        )
     });
     show_tabs(ui);
     ui.set_active_tab(index);
@@ -1194,6 +1327,14 @@ fn open_rdp(ui: &AppWindow, entry: &Entry, c: RdpCreds) {
     } else {
         format!("{}\\{}", c.domain, c.username)
     };
+    let mut opts = RdpOptions::from_settings(&entry.settings);
+    let global = with(|s| Resolution::from_key(s.settings.rdp_resolution.as_deref().unwrap_or("")));
+    // A global "fixed" size applies when the entry has none.
+    if opts.resolution == Resolution::Default && global == Resolution::Fixed {
+        let (gw, gh) = with(|s| (s.settings.rdp_width, s.settings.rdp_height));
+        opts.width = if gw >= 200 { gw } else { 1920 };
+        opts.height = if gh >= 200 { gh } else { 1080 };
+    }
     let params = rdp::Params {
         host: entry.host.clone(),
         port: entry.port,
@@ -1202,6 +1343,8 @@ fn open_rdp(ui: &AppWindow, entry: &Entry, c: RdpCreds) {
         password: c.password,
         width: w,
         height: h,
+        resolution: opts.resolution.or(global),
+        opts,
     };
     let rect = with(|s| s.rdp_rect);
     match rdp::RdpSession::connect(parent, rect, &params) {
@@ -1216,37 +1359,71 @@ fn open_rdp(ui: &AppWindow, entry: &Entry, c: RdpCreds) {
                 format!("{} ({user})", entry.name)
             };
             let index = with(|s| {
-                s.sessions.push(Session {
-                    id,
-                    title,
-                    icon: "rdp",
-                    entry_id: entry.id.clone(),
-                    state: "connecting",
-                    banner: String::new(),
-                    kind: "rdp",
-                    term: None,
-                    input: None,
-                    rdp: Some(session),
-                    pve: None,
-                });
-                s.sessions.len() as i32 - 1
+                add_session(
+                    s,
+                    Session {
+                        id,
+                        title,
+                        icon: "rdp",
+                        entry_id: entry.id.clone(),
+                        state: "connecting",
+                        banner: String::new(),
+                        kind: "rdp",
+                        term: None,
+                        input: None,
+                        rdp: Some(session),
+                        pve: None,
+                        pt: 0.0,
+                        rec: None,
+                        player: None,
+                    },
+                )
             });
             show_tabs(ui);
             ui.set_active_tab(index);
             redraw(ui);
             ui.set_status(format!("Connexion RDP à {}:{}…", entry.host, entry.port).into());
         }
-        Err(e) => ui.set_status(format!("Session RDP impossible : {e}").into()),
+        Err(e) => {
+            with(|s| s.replace_tab = None);
+            ui.set_status(format!("Session RDP impossible : {e}").into());
+        }
     }
 }
 
+/// True while a Slint popup (context menu, combo box list) is open: it is
+/// drawn inside the main window and would be hidden by the RDP child window.
+fn popup_open(ui: &AppWindow) -> bool {
+    use slint::private_unstable_api::re_exports::WindowInner;
+    !WindowInner::from_pub(ui.window()).active_popups().is_empty()
+}
+
+/// True when the main window just became the foreground window.
+#[cfg(windows)]
+fn just_activated(ui: &AppWindow) -> bool {
+    use std::sync::atomic::AtomicIsize;
+    static LAST: AtomicIsize = AtomicIsize::new(0);
+    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as isize;
+    let prev = LAST.swap(fg, Ordering::AcqRel);
+    fg != prev && Some(fg) == parent_hwnd(ui)
+}
+
+#[cfg(not(windows))]
+fn just_activated(_: &AppWindow) -> bool {
+    false
+}
+
 /// Keeps the RDP child windows over the active tab ("airspace": they are
-/// hidden when another tab, a dialog or a minimized window would be covered)
-/// and follows their connection state.
+/// hidden when another tab, a dialog, a popup menu or a minimized window
+/// would be covered) and follows their connection state.
 fn sync_rdp(ui: &AppWindow) {
     let active = ui.get_active_tab();
-    let covered = !ui.get_dialog().is_empty() || ui.window().is_minimized();
+    let covered = !ui.get_dialog().is_empty() || ui.window().is_minimized() || popup_open(ui);
+    let activated = just_activated(ui);
     let scale = ui.window().scale_factor();
+    if ui.get_scale() != scale && ui.get_active_kind() == "ssh" {
+        fit_terminal(ui);
+    }
     let (ax, ay, aw, ah) = with(|s| s.session_area);
     let rect = (
         (ax * scale).round() as i32,
@@ -1255,6 +1432,7 @@ fn sync_rdp(ui: &AppWindow) {
         (ah * scale).round() as i32,
     );
     let mut changed = Vec::new();
+    let mut hidden = false;
     with(|s| {
         let stable = s.rdp_rect == rect;
         s.rdp_rect = rect;
@@ -1269,7 +1447,7 @@ fn sync_rdp(ui: &AppWindow) {
             if state != x.state {
                 x.state = state;
                 if state == "closed" {
-                    x.banner = "Session Bureau à distance terminée".into();
+                    x.banner = r.disconnect_text().unwrap_or_else(|| "Session Bureau à distance terminée".into());
                 }
                 if i as i32 == active {
                     ui.set_status(
@@ -1286,12 +1464,22 @@ fn sync_rdp(ui: &AppWindow) {
                 changed.push(x.title.clone());
             }
             let visible = i as i32 == active && !covered && x.state != "closed" && rect.2 > 0 && rect.3 > 0;
-            r.place(rect, visible);
+            if r.place(rect, visible) {
+                hidden = true;
+            }
+            if visible && activated {
+                r.focus();
+            }
             if visible && stable && x.state == "connected" {
                 r.resize_desktop(rect.2 as u32, rect.3 as u32);
             }
         }
     });
+    if hidden {
+        // The renderer only repaints what changed: the pixels the RDP control left
+        // (white band, dialog hidden behind it) would stay on screen otherwise.
+        ui.set_native_flip(!ui.get_native_flip());
+    }
     if !changed.is_empty() {
         show_tabs(ui);
         redraw(ui);
@@ -1330,6 +1518,7 @@ fn main() -> Result<(), slint::PlatformError> {
             return;
         };
         with(|s| s.pending = Pending::RemoveSource(idx as usize));
+        ui.set_confirm_ok("Retirer".into());
         ui.set_confirm_text(
             format!(
                 "Retirer la source « {} » de cette liste ? Les données ne sont pas supprimées.",
@@ -1373,6 +1562,7 @@ fn main() -> Result<(), slint::PlatformError> {
             return;
         };
         with(|s| s.pending = Pending::Delete(sel));
+        ui.set_confirm_ok("".into());
         ui.set_confirm_text(format!("Supprimer définitivement {label} ?").into());
         ui.set_dialog_error("".into());
         ui.set_dialog("confirm".into());
@@ -1400,6 +1590,18 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_open_link(move |url| {
         if let Some(ui) = w.upgrade() {
             notes::open_link(&ui, &url);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_reconnect_tab(move || {
+        if let Some(ui) = w.upgrade() {
+            reconnect_tab(&ui);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_pick_key_file(move || {
+        if let Some(ui) = w.upgrade() {
+            connopts::pick_key_file(&ui);
         }
     });
     let w = ui.as_weak();
@@ -1542,6 +1744,8 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(ui) = w.upgrade() {
             if i >= 0 {
                 fit_terminal(&ui);
+                sync_rdp(&ui);
+                active_session(&ui, |x| x.rdp.as_ref().map(|r| r.focus()));
             }
         }
     });
@@ -1645,6 +1849,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let pve_timer = slint::Timer::default();
     pve_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(40), move || {
         if let Some(ui) = w.upgrade() {
+            recorder::tick(&ui);
             if ui.get_active_kind() == "pve" {
                 redraw(&ui);
             }

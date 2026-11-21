@@ -58,6 +58,31 @@ fn scenario(src: &dyn DataSource) {
     edited.credential_id = Some(cred.id.clone());
     assert_eq!(src.save_entry(&edited).unwrap().notes, "# Notes\nok");
 
+    // Per-entry connection settings survive a round trip (desktop-only keys included).
+    let mut ssh_opts = conn::SshOptions::from_settings(&edited.settings);
+    ssh_opts.font_size = 16;
+    ssh_opts.agent = true;
+    ssh_opts.keepalive = Some(0);
+    ssh_opts.apply(&mut edited.settings);
+    let saved = src.save_entry(&edited).unwrap();
+    assert_eq!(conn::SshOptions::from_settings(&saved.settings), ssh_opts);
+    let mut rdp = Entry::new(Kind::Rdp);
+    rdp.name = "rds-01".into();
+    rdp.host = "10.0.0.9".into();
+    let opts = conn::RdpOptions {
+        resolution: conn::Resolution::Fixed,
+        width: 1600,
+        height: 900,
+        gateway: conn::Gateway::Auto,
+        gateway_host: "gw.lan".into(),
+        console: true,
+        ..conn::RdpOptions::from_settings(&rdp.settings)
+    };
+    opts.apply(&mut rdp.settings);
+    let rdp = src.save_entry(&rdp).unwrap();
+    assert_eq!(conn::RdpOptions::from_settings(&rdp.settings), opts);
+    src.delete_entry(&rdp.id).unwrap();
+
     let tree = src.tree().unwrap();
     assert!(tree
         .entries
@@ -318,6 +343,36 @@ fn server_admin() {
     )
     .unwrap();
     src.sync_sources().unwrap();
+    // Synchronisation source: create, edit (secret kept), list, delete.
+    let mut input = admin::SyncSourceInput {
+        kind: "proxmox".into(),
+        name: "PVE test".into(),
+        url: "https://127.0.0.1:1".into(),
+        token_id: "root@pam!relay".into(),
+        secret: None,
+        interval_min: 0,
+        ..Default::default()
+    };
+    assert!(input.validate(true).is_err());
+    input.secret = Some("00000000-0000-0000-0000-000000000000".into());
+    input.options.insert("nodeEntries".into(), serde_json::Value::Bool(false));
+    let created = src.save_sync_source(None, &input).unwrap();
+    assert!(created.has_secret && !created.option_on("nodeEntries") && created.option_on("guestEntries"));
+    input.secret = None;
+    input.name = "PVE renommé".into();
+    input.interval_min = 60;
+    let edited = src.save_sync_source(Some(&created.id), &input).unwrap();
+    assert_eq!(
+        (edited.name.as_str(), edited.interval_min, edited.has_secret),
+        ("PVE renommé", 60, true)
+    );
+    assert!(src
+        .sync_sources()
+        .unwrap()
+        .iter()
+        .any(|s| s.id == created.id && s.token_id == "root@pam!relay"));
+    src.delete_sync_source(&created.id).unwrap();
+    assert!(!src.sync_sources().unwrap().iter().any(|s| s.id == created.id));
     src.recordings().unwrap();
     let xml = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sample.rdm")).unwrap();
     let plan = src.import_preview(&xml).unwrap();

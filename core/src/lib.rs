@@ -4,7 +4,9 @@
 
 pub mod admin;
 pub mod backup;
+pub mod cast;
 pub mod command;
+pub mod conn;
 pub mod local;
 pub mod markdown;
 pub mod model;
