@@ -6,6 +6,7 @@ mod admin;
 mod bulk;
 mod connopts;
 mod features;
+mod multisel;
 mod notes;
 mod pve;
 mod rdp;
@@ -13,6 +14,7 @@ mod recorder;
 mod session;
 mod settings;
 mod term;
+mod termui;
 mod update;
 
 use relay_desktop_core::conn::{RdpOptions, Resolution, SshOptions};
@@ -34,7 +36,7 @@ slint::include_modules!();
 
 const AGENT: &str = concat!("Relay-Desktop/", env!("CARGO_PKG_VERSION"));
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Sel {
     Folder(String),
     Entry(String),
@@ -112,6 +114,7 @@ enum Launch {
     Ssh(SshCreds),
     Rdp(RdpCreds),
     Pve(relay_desktop_core::source::PveConsole),
+    Vnc(Option<Zeroizing<String>>),
 }
 
 #[derive(Default)]
@@ -136,6 +139,10 @@ struct State {
     creds: Vec<Credential>,
     expanded: HashSet<String>,
     rows: Vec<Sel>,
+    /// Rows marked with Ctrl / Maj + clic (multiple selection).
+    marked: Vec<Sel>,
+    /// Items of the "Déplacer vers…" dialog.
+    move_items: Vec<relay_desktop_core::moves::Item>,
     search: String,
     current: Option<Sel>,
     editing: Option<Sel>,
@@ -228,6 +235,7 @@ fn rebuild(ui: &AppWindow) {
                 .filter(|e| e.name.to_lowercase().contains(&q) || e.host.to_lowercase().contains(&q));
             for e in sorted(hits, |e| &e.name) {
                 rows.push(TreeRow {
+                    marked: s.marked.contains(&Sel::Entry(e.id.clone())),
                     folder: false,
                     depth: 0,
                     expanded: false,
@@ -241,6 +249,7 @@ fn rebuild(ui: &AppWindow) {
                 refs.push(Sel::Entry(e.id.clone()));
             }
         }
+        s.marked.retain(|m| refs.contains(m));
         let sel = s
             .current
             .as_ref()
@@ -263,6 +272,7 @@ fn walk(s: &State, parent: Option<&str>, depth: i32, rows: &mut Vec<TreeRow>, re
             || tree.entries.iter().any(|e| e.folder_id.as_deref() == Some(&f.id));
         let count = tree.entries.iter().filter(|e| e.folder_id.as_deref() == Some(&f.id)).count();
         rows.push(TreeRow {
+            marked: s.marked.contains(&Sel::Folder(f.id.clone())),
             folder: true,
             depth,
             expanded,
@@ -280,6 +290,7 @@ fn walk(s: &State, parent: Option<&str>, depth: i32, rows: &mut Vec<TreeRow>, re
     }
     for e in sorted(tree.entries.iter().filter(|e| e.folder_id.as_deref() == parent), |e| &e.name) {
         rows.push(TreeRow {
+            marked: s.marked.contains(&Sel::Entry(e.id.clone())),
             folder: false,
             depth,
             expanded: false,
@@ -660,6 +671,7 @@ fn submit(ui: &AppWindow) {
     }
     match ui.get_dialog().as_str() {
         "update" => update::install(ui),
+        "move" => multisel::submit_move(ui),
         "source" => submit_source(ui),
         "unlock" => {
             let Pending::Unlock(idx) = with(|s| std::mem::take(&mut s.pending)) else {
@@ -944,6 +956,30 @@ fn open_session(ui: &AppWindow, external: bool) {
     launch(ui, &id, external);
 }
 
+/// The pinned SSH host key differs: shows both fingerprints and offers to
+/// trust the new key, then reconnects the tab.
+fn host_key_changed(ui: &AppWindow, session: u64, change: ssh::KeyChange) {
+    let text = format!(
+        "La clé d'hôte de {} a changé, la connexion a été refusée.\n\n\
+         Ancienne empreinte : {}\nNouvelle empreinte : {}\n\n\
+         Faites confiance à la nouvelle clé seulement si ce changement est attendu \
+         (serveur réinstallé, clé régénérée) ; sinon, quelqu'un intercepte peut-être la connexion.",
+        change.host_id, change.old, change.new
+    );
+    features::confirm_as(ui, text, "Faire confiance à la nouvelle clé", move |ui| {
+        if let Err(e) = ssh::trust_key(&settings::dir().join("known_hosts.json"), &change) {
+            ui.set_status(format!("Enregistrement de la clé impossible : {e}").into());
+            return;
+        }
+        ui.set_status(format!("Nouvelle clé d'hôte enregistrée pour {} ({})", change.host_id, change.new).into());
+        let Some(index) = with(|s| s.sessions.iter().position(|x| x.id == session)) else {
+            return;
+        };
+        ui.set_active_tab(index as i32);
+        reconnect_tab(ui);
+    });
+}
+
 /// "Reconnecter" on a closed tab: opens the entry again in the same tab.
 fn reconnect_tab(ui: &AppWindow) {
     let Some((id, entry_id)) = active_session(ui, |x| (x.id, x.entry_id.clone())) else {
@@ -1007,6 +1043,9 @@ fn launch(ui: &AppWindow, id: &str, external: bool) {
                     passphrase: reveal(SecretField::Passphrase, c.has_passphrase)?,
                 }));
             }
+            if entry.kind == Kind::Vnc && !external {
+                return Ok(Launch::Vnc(reveal(SecretField::Password, cred.is_some_and(|c| c.has_password))?));
+            }
             let target = session::Target {
                 kind: entry.kind,
                 host: entry.host.clone(),
@@ -1026,7 +1065,15 @@ fn launch(ui: &AppWindow, id: &str, external: bool) {
             Ok(Launch::External(msg)) => ui.set_status(msg.into()),
             Ok(Launch::Ssh(c)) => open_ssh(ui, &launched, c),
             Ok(Launch::Rdp(c)) => open_rdp(ui, &launched, c),
-            Ok(Launch::Pve(c)) => open_pve(ui, &launched, c),
+            Ok(Launch::Pve(c)) => open_pve(ui, &launched, pve::Target::Relay(c)),
+            Ok(Launch::Vnc(password)) => {
+                let target = pve::Target::Direct {
+                    host: launched.host.clone(),
+                    port: launched.port,
+                    password: password.unwrap_or_default(),
+                };
+                open_pve(ui, &launched, target)
+            }
             Err(e) => {
                 with(|s| {
                     s.replace_tab = None;
@@ -1038,13 +1085,15 @@ fn launch(ui: &AppWindow, id: &str, external: bool) {
     );
 }
 
-fn open_pve(ui: &AppWindow, entry: &Entry, ticket: relay_desktop_core::source::PveConsole) {
+/// Console tab (RFB): Proxmox console through Relay or direct VNC.
+fn open_pve(ui: &AppWindow, entry: &Entry, target: pve::Target) {
+    let vnc = matches!(target, pve::Target::Direct { .. });
     let id = with(|s| {
         s.next_session += 1;
         s.next_session
     });
     let w = ui.as_weak();
-    let console = pve::spawn(ticket, move |state, banner| session_event(w.clone(), id, state, banner));
+    let console = pve::spawn(target, move |state, banner| session_event(w.clone(), id, state, banner));
     let index = with(|s| {
         add_session(
             s,
@@ -1052,9 +1101,13 @@ fn open_pve(ui: &AppWindow, entry: &Entry, ticket: relay_desktop_core::source::P
                 id,
                 entry_id: entry.id.clone(),
                 title: entry.name.clone(),
-                icon: "pve",
+                icon: if vnc { "vnc" } else { "pve" },
                 state: "connecting",
-                banner: "Connexion console Proxmox…".into(),
+                banner: if vnc {
+                    format!("Connexion VNC à {}:{}…", entry.host, entry.port)
+                } else {
+                    "Connexion console Proxmox…".into()
+                },
                 kind: "pve",
                 term: None,
                 input: None,
@@ -1254,6 +1307,14 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
                 String::new()
             };
             session_event(weak.clone(), id, "connected", note);
+        }
+        ssh::Event::KeyChanged(change) => {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    host_key_changed(&ui, id, change);
+                }
+            });
         }
         ssh::Event::Closed(err) => {
             let msg = match err {
@@ -1548,6 +1609,9 @@ fn main() -> Result<(), slint::PlatformError> {
         None => {}
     }));
     ui.on_delete_selected(h(|ui| {
+        if multisel::active() {
+            return multisel::delete_all(ui);
+        }
         let Some((sel, label)) = with(|s| {
             let sel = s.current.clone()?;
             let label = match &sel {
@@ -1672,6 +1736,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_row_selected(move |i| {
         with(|s| s.current = s.rows.get(i as usize).cloned());
         if let Some(ui) = w.upgrade() {
+            multisel::clear(&ui);
             update_detail(&ui);
         }
     });
@@ -1686,6 +1751,36 @@ fn main() -> Result<(), slint::PlatformError> {
         });
         if let Some(ui) = w.upgrade() {
             rebuild(&ui);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_shortcut(move |key| {
+        let Some(ui) = w.upgrade() else { return };
+        let n = with(|s| s.sessions.len()) as i32;
+        let active = ui.get_active_tab();
+        match key.as_str() {
+            // The dashboard (-1) is part of the cycle, like the first document tab.
+            "next-tab" | "prev-tab" if n > 0 => {
+                let step = if key == "next-tab" { 1 } else { n };
+                let next = (active + 1 + step).rem_euclid(n + 1) - 1;
+                ui.set_active_tab(next);
+                ui.invoke_tab_activated(next);
+            }
+            "close-tab" if active >= 0 => ui.invoke_tab_closed(active),
+            "reload" if ui.get_connected() => features::act(&ui, "reload"),
+            _ => {}
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_row_clicked(move |i, ctrl, shift| {
+        if let Some(ui) = w.upgrade() {
+            multisel::clicked(&ui, i, ctrl, shift);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_rows_dropped(move |from, to| {
+        if let Some(ui) = w.upgrade() {
+            multisel::dropped(&ui, from, to);
         }
     });
     let w = ui.as_weak();
@@ -1723,6 +1818,7 @@ fn main() -> Result<(), slint::PlatformError> {
         match key.as_str() {
             "up" => select(if i < 0 { 0 } else { i - 1 }),
             "down" => select(i + 1),
+            "enter" if multisel::active() => multisel::open_all(&ui),
             "enter" if i >= 0 => ui.invoke_row_activated(i),
             "delete" if i >= 0 => ui.invoke_delete_selected(),
             "edit" if i >= 0 => ui.invoke_edit_selected(),
@@ -1745,7 +1841,19 @@ fn main() -> Result<(), slint::PlatformError> {
             if i >= 0 {
                 fit_terminal(&ui);
                 sync_rdp(&ui);
-                active_session(&ui, |x| x.rdp.as_ref().map(|r| r.focus()));
+                let state = active_session(&ui, |x| {
+                    x.rdp.as_ref().map(|r| {
+                        r.focus();
+                        match x.state {
+                            "closed" => x.banner.clone(),
+                            "connected" => format!("RDP connecté : {}", x.title),
+                            _ => format!("Connexion RDP : {}…", x.title),
+                        }
+                    })
+                });
+                if let Some(Some(text)) = state {
+                    ui.set_status(text.into());
+                }
             }
         }
     });
@@ -1782,54 +1890,7 @@ fn main() -> Result<(), slint::PlatformError> {
             fit_terminal(&ui);
         }
     });
-    let w = ui.as_weak();
-    ui.on_term_key(move |text, ctrl, alt, shift| {
-        let Some(ui) = w.upgrade() else { return };
-        use slint::platform::Key;
-        if shift && (text == slint::SharedString::from(Key::PageUp) || text == slint::SharedString::from(Key::PageDown)) {
-            let up = text == slint::SharedString::from(Key::PageUp);
-            active_session(&ui, |x| {
-                x.term.as_ref().map(|t| t.lock().unwrap().scroll(if up { 10 } else { -10 }))
-            });
-            redraw(&ui);
-            return;
-        }
-        let sent = active_session(&ui, |x| {
-            let (Some(term), Some(input)) = (&x.term, &x.input) else {
-                return false;
-            };
-            let mut t = term.lock().unwrap();
-            let Some(bytes) = term::key_bytes(&text, ctrl, alt, t.application_cursor()) else {
-                return false;
-            };
-            t.scroll(-1_000_000);
-            input.send(ssh::Input::Data(bytes)).is_ok()
-        });
-        if sent == Some(true) {
-            redraw(&ui);
-        }
-    });
-    let w = ui.as_weak();
-    ui.on_term_paste(move || {
-        let Some(ui) = w.upgrade() else { return };
-        let Some(text) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok()) else {
-            return;
-        };
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        active_session(&ui, |x| {
-            let (Some(term), Some(input)) = (&x.term, &x.input) else { return };
-            let bracketed = term.lock().unwrap().bracketed_paste();
-            let data = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
-            let _ = input.send(ssh::Input::Data(data.into_bytes()));
-        });
-    });
-    let w = ui.as_weak();
-    ui.on_term_scroll(move |n| {
-        if let Some(ui) = w.upgrade() {
-            active_session(&ui, |x| x.term.as_ref().map(|t| t.lock().unwrap().scroll(n as isize)));
-            redraw(&ui);
-        }
-    });
+    let _term_timer = termui::install(&ui);
 
     let w = ui.as_weak();
     ui.on_session_area(move |x, y, width, height| {

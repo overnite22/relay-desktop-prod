@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["core", "app"]
+# Patched third-party crates (see [patch.crates-io]), not formatted or linted here.
+exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/overnite22/relay-desktop-dev"
@@ -18,3 +20,9 @@ panic = "abort"
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+
+# vnc-rs 0.6.1 with RFB cut text in Latin-1 (upstream reads and writes UTF-8,
+# which loses accented characters): `latin1_string` / `latin1_bytes` in
+# vendor/vnc-rs/src/limits.rs, used by client/messages.rs.
+[patch.crates-io]
+vnc-rs = { path = "vendor/vnc-rs" }

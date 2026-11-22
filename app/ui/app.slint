@@ -1,6 +1,6 @@
 import { Button, LineEdit, ComboBox, CheckBox, TextEdit, ListView, ScrollView, Palette } from "std-widgets.slint";
 
-export struct TreeRow { folder: bool, depth: int, expanded: bool, children: bool, name: string, kind: string, detail: string, status: int, favorite: bool }
+export struct TreeRow { marked: bool, folder: bool, depth: int, expanded: bool, children: bool, name: string, kind: string, detail: string, status: int, favorite: bool }
 export struct Field { label: string, value: string }
 export struct SessionTab { title: string, kind: string, state: string }
 export struct CredRow { name: string, username: string, detail: string }
@@ -253,6 +253,11 @@ export component AppWindow inherits Window {
 
     in property <[TreeRow]> rows;
     in-out property <int> selected: -1;
+    // Row under the pointer while dragging tree rows (-1: root, -2: none).
+    in-out property <int> drop-row: -2;
+    in property <int> marked-count;
+    in property <string> move-title;
+    in-out property <int> move-target;
     in-out property <string> search;
 
     in property <string> detail-kind;
@@ -354,6 +359,7 @@ export component AppWindow inherits Window {
     in-out property <bool> o-auto-update;
     in-out property <int> o-font;
     in-out property <string> o-font-size;
+    in-out property <bool> o-copy-select;
     in-out property <int> o-rdp-res;
     in-out property <string> o-rdp-width;
     in-out property <string> o-rdp-height;
@@ -369,6 +375,7 @@ export component AppWindow inherits Window {
     in-out property <bool> er-drives;
     in-out property <bool> er-printers;
     in-out property <int> er-audio;
+    in-out property <int> er-keys;
     in-out property <bool> er-console;
     in-out property <int> er-security;
     in-out property <bool> er-ignore-cert;
@@ -435,6 +442,8 @@ export component AppWindow inherits Window {
     callback search-edited(string);
     callback row-selected(int);
     callback row-activated(int);
+    callback row-clicked(int, bool, bool);
+    callback rows-dropped(int, int);
     callback row-toggled(int);
     callback tree-key(string);
     callback browse-path();
@@ -447,8 +456,9 @@ export component AppWindow inherits Window {
     callback console-key(string,bool);
     callback term-key(string, bool, bool, bool);
     callback term-size(length, length);
-    callback term-paste();
-    callback term-scroll(int);
+    // kind: 0 down, 1 up, 2 move, 3 cancel; button: 0 left, 1 middle, 2 right, -1 none.
+    callback term-mouse(int, int, length, length, bool, bool, bool);
+    callback term-wheel(int, length, length, bool);
     in property <string> active-kind;
     in property <bool> can-open-external;
     callback open-external();
@@ -474,7 +484,25 @@ export component AppWindow inherits Window {
     in-out property <string> upd-message;
     in-out property <bool> upd-auto: true;
 
+    callback shortcut(string);
 
+    // Window shortcuts: keys not handled by the focused element bubble up here;
+    // Ctrl+Tab is taken first, even from a terminal.
+    keys := FocusScope {
+    init => { self.focus(); }
+    capture-key-pressed(e) => {
+        if (e.modifiers.control && (e.text == Key.Tab || e.text == Key.Backtab)) {
+            root.shortcut(e.modifiers.shift || e.text == Key.Backtab ? "prev-tab" : "next-tab");
+            return accept;
+        }
+        reject
+    }
+    key-pressed(e) => {
+        if (e.modifiers.control && !e.modifiers.alt && (e.text == "f" || e.text == "F")) { search-box.focus(); search-box.select-all(); return accept; }
+        if (e.modifiers.control && !e.modifiers.alt && (e.text == "w" || e.text == "W" || e.text == Key.F4)) { root.shortcut("close-tab"); return accept; }
+        if (e.text == Key.F5) { root.shortcut("reload"); return accept; }
+        reject
+    }
     VerticalLayout {
         // Ribbon tabs (.ribbon-tabs)
         Rectangle {
@@ -598,6 +626,10 @@ export component AppWindow inherits Window {
                         RbSmall { icon: @image-url("icons/layout-dashboard.svg"); label: "Tableau de bord"; clicked => { root.act("dash"); } }
                     }
                 }
+                RGroup {
+                    title: "Session";
+                    RbLarge { icon: @image-url("icons/maximize.svg"); label: "Plein écran"; tint: #58a6ff; enabled: root.active-kind == "rdp"; clicked => { root.act("fullscreen"); } }
+                }
             }
             if root.rtab == 2: HorizontalLayout {
                 padding-left: 6px;
@@ -680,7 +712,7 @@ export component AppWindow inherits Window {
                         padding: 8px;
                         padding-top: 4px;
                         spacing: 4px;
-                        LineEdit {
+                        search-box := LineEdit {
                             placeholder-text: "Rechercher (nom, hôte)…";
                             text <=> root.search;
                             enabled: root.connected;
@@ -701,7 +733,7 @@ export component AppWindow inherits Window {
                         }
                         tree-menu := ContextMenuArea {
                         Menu {
-                            if root.has-entry: MenuItem { title: root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session"; activated => { root.act("open"); } }
+                            if root.has-entry: MenuItem { title: root.marked-count > 1 ? "Ouvrir les entrées sélectionnées (" + root.marked-count + ")" : root.entry-kind == "web" ? "Ouvrir le site" : "Ouvrir la session"; activated => { root.act("open"); } }
                             if root.can-test: MenuItem { title: "Tester la connexion"; activated => { root.act("test-connection"); } }
                             if root.has-entry: MenuItem { title: "Modifier…"; activated => { root.act("edit"); } }
                             if root.has-entry: MenuItem { title: "Dupliquer"; activated => { root.act("dup"); } }
@@ -719,7 +751,8 @@ export component AppWindow inherits Window {
                             MenuItem { title: "Nouveau dossier…"; activated => { root.act("folder"); } }
                             if root.has-folder: MenuItem { title: "Renommer…"; activated => { root.act("edit"); } }
                             if root.can-edit: MenuSeparator { }
-                            if root.can-edit: MenuItem { title: "Supprimer"; activated => { root.act("del"); } }
+                            if root.can-edit: MenuItem { title: root.marked-count > 1 ? "Supprimer la sélection (" + root.marked-count + ")" : "Supprimer"; activated => { root.act("del"); } }
+                            if root.can-edit: MenuItem { title: root.marked-count > 1 ? "Déplacer la sélection vers…" : "Déplacer vers…"; activated => { root.act("move"); } }
                         }
                         // Right-click on the empty part of the tree: menu of the root.
                         TouchArea {
@@ -736,15 +769,49 @@ export component AppWindow inherits Window {
                         ListView {
                             for row[i] in root.rows: Rectangle {
                                 height: 24px;
-                                background: i == root.selected ? Theme.selection : ta.has-hover ? Theme.bg-hover : transparent;
+                                background: i == root.selected || row.marked ? Theme.selection : ta.has-hover && root.drop-row == -2 ? Theme.bg-hover : transparent;
+                                border-width: i == root.drop-row && row.folder ? 1px : 0;
+                                border-color: Theme.accent;
                                 accessible-role: list-item;
                                 accessible-label: row.name;
                                 accessible-item-selected: i == root.selected;
                                 accessible-action-default => { root.selected = i; root.row-selected(i); }
                                 ta := TouchArea {
-                                    clicked => { tree-keys.focus(); root.selected = i; root.row-selected(i); }
+                                    // Modifiers of the press, drag in progress (rows moved with the mouse).
+                                    property <bool> ctrl;
+                                    property <bool> shift;
+                                    property <bool> dragging;
+                                    property <length> press-y;
+                                    mouse-cursor: self.dragging && self.pressed ? MouseCursor.move : MouseCursor.default;
+                                    clicked => {
+                                        if (self.dragging) { return; }
+                                        tree-keys.focus();
+                                        if (self.ctrl || self.shift) { root.row-clicked(i, self.ctrl, self.shift); }
+                                        else { root.selected = i; root.row-selected(i); }
+                                    }
                                     double-clicked => { root.selected = i; root.row-activated(i); }
+                                    moved => {
+                                        if (self.pressed && !self.dragging && abs(self.mouse-y - self.press-y) > 8px) { self.dragging = true; }
+                                        if (self.dragging) {
+                                            if (self.mouse-x < 0 || self.mouse-x > self.width) { root.drop-row = -2; }
+                                            else {
+                                                root.drop-row = i + floor(self.mouse-y / 24px);
+                                                if (root.drop-row >= root.rows.length) { root.drop-row = -1; }
+                                                if (root.drop-row < -1) { root.drop-row = -2; }
+                                            }
+                                        }
+                                    }
                                     pointer-event(e) => {
+                                        if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                            self.ctrl = e.modifiers.control;
+                                            self.shift = e.modifiers.shift;
+                                            self.dragging = false;
+                                            self.press-y = self.mouse-y;
+                                        }
+                                        if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up && self.dragging) {
+                                            root.rows-dropped(i, root.drop-row);
+                                            root.drop-row = -2;
+                                        }
                                         if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
                                             tree-keys.focus();
                                             root.selected = i;
@@ -962,18 +1029,22 @@ export component AppWindow inherits Window {
                     init => { self.focus(); root.term-size(self.width, self.height); }
                     changed width => { root.term-size(self.width, self.height); }
                     changed height => { root.term-size(self.width, self.height); }
+                    // Copy / paste keys (Ctrl+C with a selection, Ctrl+V, Shift+Insert…) are handled by term-key.
                     key-pressed(event) => {
-                        if (event.modifiers.control && event.modifiers.shift && (event.text == "V" || event.text == "v")) { root.term-paste(); return accept; }
                         root.term-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
                         accept
                     }
-                    TouchArea {
-                        clicked => { term-fs.focus(); }
+                    term-ta := TouchArea {
+                        mouse-cursor: text;
                         pointer-event(e) => {
-                            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) { term-fs.focus(); root.term-paste(); }
+                            if (e.kind == PointerEventKind.down) { term-fs.focus(); }
+                            root.term-mouse(
+                                e.kind == PointerEventKind.down ? 0 : e.kind == PointerEventKind.up ? 1 : e.kind == PointerEventKind.move ? 2 : 3,
+                                e.button == PointerEventButton.left ? 0 : e.button == PointerEventButton.middle ? 1 : e.button == PointerEventButton.right ? 2 : -1,
+                                self.mouse-x - 4px, self.mouse-y - 4px, e.modifiers.shift, e.modifiers.control, e.modifiers.alt);
                         }
                         scroll-event(e) => {
-                            root.term-scroll(e.delta-y > 0 ? 3 : -3);
+                            root.term-wheel(e.delta-y > 0 ? 3 : -3, self.mouse-x - 4px, self.mouse-y - 4px, e.modifiers.shift);
                             accept
                         }
                     }
@@ -1031,6 +1102,11 @@ export component AppWindow inherits Window {
             if root.active-tab < 0: Rectangle {
                 vertical-stretch: 1;
                 background: Theme.bg;
+                // Same area as the session pane: a new RDP tab starts at the right size.
+                init => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                changed width => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                changed height => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                changed absolute-position => { root.session-area(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
                 if root.detail-title == "": VerticalLayout {
                     alignment: center;
                     spacing: 10px;
@@ -1209,6 +1285,7 @@ export component AppWindow inherits Window {
                 Text { text: "Relay Desktop " + root.version; color: white; font-size: 12px; vertical-alignment: center; }
             }
         }
+    }
     }
 
     if root.dialog == "notes": Dialog {
@@ -1752,6 +1829,7 @@ export component AppWindow inherits Window {
             FormRow { label: "Police"; horizontal-stretch: 2; ComboBox { model: ["Consolas", "Cascadia Mono", "Lucida Console", "Courier New"]; current-index <=> root.o-font; } }
             FormRow { label: "Taille (6 à 48)"; horizontal-stretch: 1; LineEdit { text <=> root.o-font-size; input-type: number; placeholder-text: "14"; } }
         }
+        CheckBox { text: "Copier automatiquement le texte sélectionné (comme PuTTY)"; checked <=> root.o-copy-select; }
         Text { text: "Sessions RDP (par défaut)"; font-weight: 600; color: Theme.text; }
         HorizontalLayout {
             spacing: 10px;
@@ -1786,6 +1864,7 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 10px;
                 FormRow { label: "Son"; horizontal-stretch: 1; ComboBox { model: ["Sur ce poste", "Sur l'ordinateur distant", "Désactivé"]; current-index <=> root.er-audio; } }
+                FormRow { label: "Touches Windows (Alt+Tab…)"; horizontal-stretch: 1; ComboBox { model: ["En plein écran", "Sur l'ordinateur distant", "Sur ce poste"]; current-index <=> root.er-keys; } }
                 FormRow { label: "Sécurité"; horizontal-stretch: 1; ComboBox { model: ["Automatique", "NLA", "TLS", "RDP"]; current-index <=> root.er-security; } }
             }
             HorizontalLayout {
@@ -1932,6 +2011,17 @@ export component AppWindow inherits Window {
             checked <=> root.upd-auto;
             toggled => { root.update-auto-toggled(self.checked); }
         }
+    }
+
+    if root.dialog == "move": Dialog {
+        title: root.move-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Déplacer";
+        card-width: 440px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        FormRow { label: "Dossier de destination"; ComboBox { model: root.folder-names; current-index <=> root.move-target; } }
     }
 
     if root.dialog == "confirm": Dialog {

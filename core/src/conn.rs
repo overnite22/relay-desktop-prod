@@ -6,7 +6,7 @@
 //! only used by the desktop client are ignored by the server (it stores the
 //! object as is) : `resolution`, `width`, `height`, `colorDepth`, `multiMon`,
 //! `redirectDrives`, `redirectPrinters`, `audioMode`, `gatewayHost`,
-//! `gatewayUsage`, `gatewaySameCreds`, `keepalive`, `sshAgent`, `keyFile`.
+//! `gatewayUsage`, `gatewaySameCreds`, `keyboardHook`, `keepalive`, `sshAgent`, `keyFile`.
 //! Unknown keys (`drive`, `keyboardLayout`, `sftp`, Proxmox keys…) are kept.
 
 use serde_json::{Map, Value};
@@ -113,6 +113,37 @@ impl Audio {
     }
 }
 
+/// Where Windows key combinations (Alt+Tab, Windows key…) go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyHook {
+    /// To the session only in full screen (mstsc default).
+    #[default]
+    FullScreen,
+    Remote,
+    Local,
+}
+
+impl KeyHook {
+    pub const ALL: [KeyHook; 3] = [KeyHook::FullScreen, KeyHook::Remote, KeyHook::Local];
+
+    fn key(self) -> &'static str {
+        match self {
+            KeyHook::FullScreen => "",
+            KeyHook::Remote => "remote",
+            KeyHook::Local => "local",
+        }
+    }
+
+    /// `KeyboardHookMode` of the RDP control.
+    pub fn mode(self) -> i32 {
+        match self {
+            KeyHook::Local => 0,
+            KeyHook::Remote => 1,
+            KeyHook::FullScreen => 2,
+        }
+    }
+}
+
 /// Use of an RD Gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Gateway {
@@ -162,6 +193,7 @@ pub struct RdpOptions {
     pub drives: bool,
     pub printers: bool,
     pub audio: Audio,
+    pub keyboard: KeyHook,
     pub console: bool,
     /// One of [`RDP_SECURITY`] (empty = any).
     pub security: String,
@@ -200,6 +232,10 @@ impl RdpOptions {
             } else {
                 Audio::Local
             },
+            keyboard: KeyHook::ALL
+                .into_iter()
+                .find(|k| k.key() == get_str(s, "keyboardHook"))
+                .unwrap_or_default(),
             console: get_bool(s, "console").unwrap_or(false),
             security: Some(get_str(s, "security"))
                 .filter(|v| RDP_SECURITY.contains(v))
@@ -227,6 +263,7 @@ impl RdpOptions {
         set_bool(s, "redirectPrinters", self.printers, false);
         set_bool(s, "disableAudio", self.audio == Audio::Off, false);
         set_str(s, "audioMode", if self.audio == Audio::Remote { "remote" } else { "" });
+        set_str(s, "keyboardHook", self.keyboard.key());
         set_bool(s, "console", self.console, false);
         set_str(s, "security", if self.security == "any" { "" } else { &self.security });
         match self.ignore_cert {
@@ -466,7 +503,11 @@ mod tests {
         o.gateway_host = " gw.lan ".into();
         o.gateway_same_creds = false;
         o.disable_copy = true;
+        o.keyboard = KeyHook::Remote;
         o.apply(&mut s);
+        assert_eq!(s["keyboardHook"], json!("remote"));
+        assert_eq!(KeyHook::Remote.mode(), 1);
+        assert_eq!(KeyHook::default().mode(), 2);
         assert_eq!(s["drive"], json!(false));
         assert_eq!(s["keyboardLayout"], json!("de-de-qwertz"));
         assert!(!s.contains_key("console"));
@@ -476,6 +517,7 @@ mod tests {
         let back = RdpOptions::from_settings(&s);
         assert_eq!(back.width, 1600);
         assert_eq!(back.gateway, Gateway::Auto);
+        assert_eq!(back.keyboard, KeyHook::Remote);
         assert!(!back.gateway_same_creds);
         assert!(!back.clipboard());
         assert_eq!(back.gateway_host, "gw.lan");

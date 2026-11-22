@@ -39,6 +39,9 @@ pub struct Settings {
     /// Terminal font size in logical pixels (0 = 14).
     #[serde(default)]
     pub term_font_size: u32,
+    /// Copy the terminal selection as soon as it is made (PuTTY).
+    #[serde(default)]
+    pub term_copy_on_select: bool,
     /// Default desktop size of RDP tabs: "fit", "fixed" or "fullscreen".
     #[serde(default)]
     pub rdp_resolution: Option<String>,
@@ -70,6 +73,7 @@ impl Default for Settings {
             theme: None,
             term_font: None,
             term_font_size: 0,
+            term_copy_on_select: false,
             rdp_resolution: None,
             rdp_width: 0,
             rdp_height: 0,

@@ -1,4 +1,5 @@
-//! Native RFB client over the authenticated Relay console WebSocket.
+//! Native RFB client: Proxmox consoles over the authenticated Relay WebSocket,
+//! and direct VNC connections (TCP, VNC Authentication or no password).
 use futures_util::{SinkExt, StreamExt};
 use relay_desktop_core::source::PveConsole;
 use slint::{Rgba8Pixel, SharedPixelBuffer};
@@ -27,6 +28,23 @@ impl Frame {
         self.pixels = vec![0; w as usize * h as usize * 4];
         Ok(())
     }
+    /// CopyRect: the `src` area of the frame moves to `dst` (same size).
+    fn copy(&mut self, dst: vnc::Rect, src: vnc::Rect) -> Result<(), String> {
+        let (w, h) = (dst.width as usize, dst.height as usize);
+        let fits = |r: &vnc::Rect| r.x as usize + w <= self.width as usize && r.y as usize + h <= self.height as usize;
+        if !fits(&dst) || !fits(&src) {
+            return Err("Rectangle VNC invalide".into());
+        }
+        let stride = self.width as usize * 4;
+        // Overlapping areas: copy rows away from the destination first.
+        let rows: Box<dyn Iterator<Item = usize>> = if dst.y > src.y { Box::new((0..h).rev()) } else { Box::new(0..h) };
+        for row in rows {
+            let s = (src.y as usize + row) * stride + src.x as usize * 4;
+            let d = (dst.y as usize + row) * stride + dst.x as usize * 4;
+            self.pixels.copy_within(s..s + w * 4, d);
+        }
+        Ok(())
+    }
     fn raw(&mut self, r: vnc::Rect, data: &[u8]) -> Result<(), String> {
         if r.x as u32 + r.width as u32 > self.width
             || r.y as u32 + r.height as u32 > self.height
@@ -45,6 +63,41 @@ impl Frame {
         Ok(())
     }
 }
+/// Clipboard shared with the VNC server (RFB cut text, Latin-1, LF line
+/// breaks): server text goes to the Windows clipboard, a new local text goes
+/// to the server with the next key or pointer event.
+#[derive(Default)]
+struct ClipSync {
+    /// Last text exchanged either way, in LF form.
+    last: String,
+    checked: Option<std::time::Instant>,
+}
+
+impl ClipSync {
+    fn server_text(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n");
+        if text == self.last {
+            return;
+        }
+        self.last = text.clone();
+        let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.replace('\n', "\r\n")));
+    }
+
+    /// Local clipboard text if it changed (checked at most 4 times a second).
+    fn local_change(&mut self) -> Option<String> {
+        if self.checked.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250)) {
+            return None;
+        }
+        self.checked = Some(std::time::Instant::now());
+        let text = arboard::Clipboard::new().ok()?.get_text().ok()?.replace("\r\n", "\n");
+        if text.is_empty() || text == self.last {
+            return None;
+        }
+        self.last = text.clone();
+        Some(text)
+    }
+}
+
 pub struct Console {
     pub frame: Arc<Mutex<Frame>>,
     pub input: mpsc::UnboundedSender<X11Event>,
@@ -57,7 +110,17 @@ impl Drop for Console {
         }
     }
 }
-pub fn spawn(ticket: PveConsole, event: impl Fn(&'static str, String) + Send + 'static) -> Console {
+/// What the console connects to.
+pub enum Target {
+    Relay(PveConsole),
+    Direct {
+        host: String,
+        port: u16,
+        password: zeroize::Zeroizing<String>,
+    },
+}
+
+pub fn spawn(target: Target, event: impl Fn(&'static str, String) + Send + 'static) -> Console {
     let frame = Arc::new(Mutex::new(Frame::default()));
     let f = frame.clone();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -66,7 +129,7 @@ pub fn spawn(ticket: PveConsole, event: impl Fn(&'static str, String) + Send + '
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
             tokio::select! {
-                result=run(ticket,f,rx,&event) => match result { Ok(())=>event("closed","Console terminée".into()), Err(e)=>event("error",e) },
+                result=run(target,f,rx,&event) => match result { Ok(())=>event("closed","Console terminée".into()), Err(e)=>event("error",e) },
                 _=stop=>{}
             }
         });
@@ -78,11 +141,25 @@ pub fn spawn(ticket: PveConsole, event: impl Fn(&'static str, String) + Send + '
     }
 }
 async fn run(
-    ticket: PveConsole,
+    target: Target,
     frame: Arc<Mutex<Frame>>,
-    mut input: mpsc::UnboundedReceiver<X11Event>,
+    input: mpsc::UnboundedReceiver<X11Event>,
     event: &(impl Fn(&'static str, String) + Send),
 ) -> Result<(), String> {
+    let ticket = match target {
+        Target::Relay(t) => t,
+        Target::Direct { host, port, password } => {
+            let tcp = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio::net::TcpStream::connect((host.as_str(), port)),
+            )
+            .await
+            .map_err(|_| format!("{host}:{port} : délai de connexion dépassé"))?
+            .map_err(|e| format!("{host}:{port} : {e}"))?;
+            let _ = tcp.set_nodelay(true);
+            return rfb(tcp, password, frame, input, event).await;
+        }
+    };
     let mut req = ticket
         .url
         .as_str()
@@ -122,11 +199,25 @@ async fn run(
         }
     }
     let _guard = Guard(transport);
-    let password = ticket.password;
+    rfb(stream, ticket.password, frame, input, event).await
+}
+
+/// RFB session on an established stream, until it ends or the tab closes.
+async fn rfb<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>(
+    stream: S,
+    password: zeroize::Zeroizing<String>,
+    frame: Arc<Mutex<Frame>>,
+    mut input: mpsc::UnboundedReceiver<X11Event>,
+    event: &(impl Fn(&'static str, String) + Send),
+) -> Result<(), String> {
     let client = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         VncConnector::new(stream)
             .set_auth_method(async move { Ok(password.to_string()) })
             .set_pixel_format(PixelFormat::rgba())
+            // Preferred first: compressed tiles, moved areas, then raw pixels.
+            .add_encoding(VncEncoding::Zrle)
+            .add_encoding(VncEncoding::Trle)
+            .add_encoding(VncEncoding::CopyRect)
             .add_encoding(VncEncoding::Raw)
             .add_encoding(VncEncoding::DesktopSizePseudo)
             .allow_shared(true)
@@ -137,17 +228,31 @@ async fn run(
     })
     .await
     .map_err(|_| "Délai d'authentification VNC dépassé")?
-    .map_err(|_| "Initialisation VNC refusée")?;
+    .map_err(|e| format!("Initialisation VNC refusée (mot de passe ou serveur incompatible) : {e}"))?;
     event("connected", String::new());
     let mut refresh = tokio::time::interval(std::time::Duration::from_millis(40));
+    let mut clip = ClipSync::default();
     loop {
         tokio::select! {
             e=client.recv_event()=>match e.map_err(|_|"Console VNC interrompue")? {
                 VncEvent::SetResolution(s)=>frame.lock().unwrap().resize(s.width,s.height)?,
                 VncEvent::RawImage(r,b)=>frame.lock().unwrap().raw(r,&b)?,
+                VncEvent::Copy(dst,src)=>frame.lock().unwrap().copy(dst,src)?,
+                VncEvent::Text(t)=>clip.server_text(&t),
                 VncEvent::Error(_)=>return Err("Erreur de console VNC".into()), _=>{}
             },
-            e=input.recv()=>match e { Some(e)=>client.input(e).await.map_err(|_|"Envoi VNC impossible")?, None=>{let _=client.close().await; return Ok(());} },
+            e=input.recv()=>match e {
+                Some(e)=>{
+                    // The local clipboard goes to the server when the user acts in the session.
+                    if matches!(e, X11Event::KeyEvent(_) | X11Event::PointerEvent(_)) {
+                        if let Some(t) = clip.local_change() {
+                            client.input(X11Event::CopyText(t)).await.map_err(|_|"Envoi VNC impossible")?;
+                        }
+                    }
+                    client.input(e).await.map_err(|_|"Envoi VNC impossible")?
+                }
+                None=>{let _=client.close().await; return Ok(());}
+            },
             _=refresh.tick()=>{client.input(X11Event::Refresh).await.map_err(|_|"Console interrompue")?;}
         }
     }
@@ -282,7 +387,7 @@ mod tunnel_tests {
             bearer: zeroize::Zeroizing::new("test-device".into()),
             password: zeroize::Zeroizing::new(String::new()),
         };
-        let console = spawn(ticket, |_, _| {});
+        let console = spawn(Target::Relay(ticket), |_, _| {});
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if console.frame.lock().unwrap().pixels.first() == Some(&11) {

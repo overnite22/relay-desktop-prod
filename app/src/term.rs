@@ -1,6 +1,7 @@
 //! Terminal emulation (vt100) rendered to an RGBA image with a monospace
 //! system font (Consolas), for embedded SSH tabs.
 
+use relay_desktop_core::termsel::{Line, MouseEncoding, MouseMode, Point, Selection, Unit};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 use std::collections::HashMap;
 use std::num::NonZeroU16;
@@ -76,8 +77,19 @@ impl Default for Style {
     }
 }
 
+/// Counts rows dropped off the top of the history (main screen) or of the
+/// alternate screen, so absolute line numbers stay stable.
+#[derive(Default)]
+struct Dropped([i64; 2]);
+
+impl vt100::Callbacks for Dropped {
+    fn on_scroll(&mut self, _: vt100::capture::RowContents<'_>, alternate: bool) {
+        self.0[usize::from(alternate)] += 1;
+    }
+}
+
 pub struct Term {
-    parser: vt100::Parser,
+    parser: vt100::Parser<Dropped>,
     fonts: Arc<Fonts>,
     style: Style,
     px: f32,
@@ -85,7 +97,8 @@ pub struct Term {
     cell_h: usize,
     ascent: f32,
     glyphs: HashMap<(char, bool), (fontdue::Metrics, Vec<u8>)>,
-    scroll: usize,
+    /// Text selection and the screen (main / alternate) it belongs to.
+    sel: Option<(Selection, bool)>,
 }
 
 fn nz(v: u16) -> NonZeroU16 {
@@ -112,7 +125,7 @@ fn color(c: vt100::Color, default: [u8; 3]) -> [u8; 3] {
 impl Term {
     pub fn new(fonts: Arc<Fonts>, px: f32, rows: u16, cols: u16, style: Style) -> Term {
         let mut t = Term {
-            parser: vt100::Parser::new(nz(rows), nz(cols), style.scrollback),
+            parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), style.scrollback, Dropped::default()),
             fonts,
             style,
             px: 0.0,
@@ -120,7 +133,7 @@ impl Term {
             cell_h: 1,
             ascent: 0.0,
             glyphs: HashMap::new(),
-            scroll: 0,
+            sel: None,
         };
         t.set_px(px);
         t
@@ -167,6 +180,7 @@ impl Term {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.sel = None;
         self.parser.set_size(nz(rows), nz(cols));
     }
 
@@ -178,11 +192,142 @@ impl Term {
         self.parser.screen().bracketed_paste()
     }
 
-    /// Scrolls the view back `lines` rows (0 = live screen).
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
+    }
+
+    pub fn mouse_mode(&self) -> MouseMode {
+        use vt100::MouseProtocolMode as M;
+        match self.parser.screen().mouse_protocol_mode() {
+            M::None => MouseMode::None,
+            M::Press => MouseMode::Press,
+            M::PressRelease => MouseMode::PressRelease,
+            M::ButtonMotion => MouseMode::ButtonMotion,
+            M::AnyMotion => MouseMode::AnyMotion,
+        }
+    }
+
+    pub fn mouse_encoding(&self) -> MouseEncoding {
+        use vt100::MouseProtocolEncoding as E;
+        match self.parser.screen().mouse_protocol_encoding() {
+            E::Default => MouseEncoding::Default,
+            E::Utf8 => MouseEncoding::Utf8,
+            E::Sgr => MouseEncoding::Sgr,
+        }
+    }
+
+    /// Scrolls the view back `delta` rows (negative: towards the live screen).
     pub fn scroll(&mut self, delta: isize) {
-        let max = self.parser.screen().scrollback_len() as isize;
-        self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
-        self.parser.screen_mut().set_scrollback(self.scroll);
+        let screen = self.parser.screen_mut();
+        let max = screen.scrollback_len() as isize;
+        let to = (screen.scrollback() as isize + delta).clamp(0, max) as usize;
+        screen.set_scrollback(to);
+    }
+
+    /// Absolute line shown on the first visible row.
+    fn first_line(&self) -> i64 {
+        let screen = self.parser.screen();
+        let alt = screen.alternate_screen();
+        let dropped = self.parser.callbacks().0[usize::from(alt)];
+        if alt {
+            dropped
+        } else {
+            dropped + (screen.scrollback_len() - screen.scrollback()) as i64
+        }
+    }
+
+    /// Cell under the physical point (`x`, `y`) of the image (row clamped to
+    /// the screen), the nearest cell boundary, and how many rows above
+    /// (negative) or below (positive) the screen the point is.
+    pub fn hit(&self, x: f32, y: f32) -> (Point, Point, i32) {
+        let (rows, cols) = self.size();
+        let row = (y / self.cell_h as f32).floor() as i32;
+        let outside = if row < 0 { row } else { (row - rows as i32 + 1).max(0) };
+        let line = self.first_line() + i64::from(row.clamp(0, rows as i32 - 1));
+        let cell = (x / self.cell_w as f32).floor().clamp(0.0, cols as f32 - 1.0) as u16;
+        let bound = (x / self.cell_w as f32).round().clamp(0.0, cols as f32) as u16;
+        (Point::new(line, cell), Point::new(line, bound), outside)
+    }
+
+    /// Visible row of an absolute line, if shown.
+    pub fn view_row(&self, line: i64) -> Option<u16> {
+        let r = line - self.first_line();
+        (0..i64::from(self.size().0)).contains(&r).then_some(r as u16)
+    }
+
+    /// Reads an absolute line, from the history if needed.
+    fn line(&mut self, abs: i64) -> Option<Line> {
+        let (rows, cols) = self.size();
+        let alt = self.alternate_screen();
+        let idx = abs - self.parser.callbacks().0[usize::from(alt)];
+        let screen = self.parser.screen_mut();
+        let len = if alt { 0 } else { screen.scrollback_len() as i64 };
+        if idx < 0 || idx >= len + i64::from(rows) {
+            return None;
+        }
+        let saved = screen.scrollback();
+        let (offset, r) = if idx >= len {
+            (0, (idx - len) as u16)
+        } else {
+            ((len - idx) as usize, 0)
+        };
+        if offset != saved {
+            screen.set_scrollback(offset);
+        }
+        let cells = (0..cols)
+            .map(|c| match screen.cell(r, c) {
+                Some(cell) if cell.is_wide_continuation() => String::new(),
+                Some(cell) if cell.has_contents() => cell.contents().to_string(),
+                _ => " ".to_string(),
+            })
+            .collect();
+        let wrapped = screen.row_wrapped(r);
+        if offset != saved {
+            screen.set_scrollback(saved);
+        }
+        Some(Line { cells, wrapped })
+    }
+
+    /// The selection, dropped when the other screen (main / alternate) is shown.
+    fn valid_selection(&mut self) -> Option<&Selection> {
+        let alt = self.alternate_screen();
+        if self.sel.as_ref().is_some_and(|(_, a)| *a != alt) {
+            self.sel = None;
+        }
+        self.sel.as_ref().map(|(s, _)| s)
+    }
+
+    /// A selection exists, even empty (start of Shift+click).
+    pub fn has_anchor(&mut self) -> bool {
+        self.valid_selection().is_some()
+    }
+
+    pub fn has_selection(&mut self) -> bool {
+        self.valid_selection().is_some_and(|s| !s.is_empty())
+    }
+
+    pub fn select_start(&mut self, unit: Unit, cell: Point, bound: Point) {
+        let alt = self.alternate_screen();
+        let sel = Selection::new(&mut |l| self.line(l), unit, cell, bound);
+        self.sel = Some((sel, alt));
+    }
+
+    pub fn select_extend(&mut self, cell: Point, bound: Point) {
+        let Some(mut sel) = self.valid_selection().cloned() else { return };
+        sel.extend(&mut |l| self.line(l), cell, bound);
+        self.sel = Some((sel, self.alternate_screen()));
+    }
+
+    /// Clears the selection; true if there was one.
+    pub fn clear_selection(&mut self) -> bool {
+        self.sel.take().is_some_and(|(s, _)| !s.is_empty())
+    }
+
+    /// Selected text (CRLF line breaks on Windows), if any.
+    pub fn selection_text(&mut self) -> Option<String> {
+        let sel = self.valid_selection().filter(|s| !s.is_empty()).cloned()?;
+        let text = sel.text(&mut |l| self.line(l));
+        Some(if cfg!(windows) { text.replace('\n', "\r\n") } else { text })
     }
 
     pub fn render(&mut self) -> SharedPixelBuffer<Rgba8Pixel> {
@@ -194,12 +339,19 @@ impl Term {
         for chunk in px.as_chunks_mut::<4>().0 {
             chunk.copy_from_slice(&[bg0[0], bg0[1], bg0[2], 255]);
         }
+        let first = self.first_line();
+        let alt = self.alternate_screen();
+        let sel = self
+            .sel
+            .as_ref()
+            .filter(|(s, a)| *a == alt && !s.is_empty())
+            .map(|(s, _)| s.clone());
         let screen = self.parser.screen();
         let glyphs = &mut self.glyphs;
         let fonts = &self.fonts;
         let (size, ascent, cell_w, cell_h) = (self.px, self.ascent, self.cell_w, self.cell_h);
         let (cur_r, cur_c) = screen.cursor_position();
-        let show_cursor = !screen.hide_cursor() && self.scroll == 0;
+        let show_cursor = !screen.hide_cursor() && screen.scrollback() == 0;
         for (pass, r) in (0..2).flat_map(|p| (0..rows).map(move |r| (p, r))) {
             for c in 0..cols {
                 let Some(cell) = screen.cell(r, c) else { continue };
@@ -215,10 +367,13 @@ impl Term {
                         }
                     }
                 }
-                if cell.inverse() ^ (show_cursor && r == cur_r && c == cur_c) {
+                let span: usize = if cell.is_wide() { 2 } else { 1 };
+                let selected = sel
+                    .as_ref()
+                    .is_some_and(|s| (c..c + span as u16).any(|k| s.contains(first + i64::from(r), k)));
+                if cell.inverse() ^ (show_cursor && r == cur_r && c == cur_c) ^ selected {
                     std::mem::swap(&mut fg, &mut bg);
                 }
-                let span = if cell.is_wide() { 2 } else { 1 };
                 let (x0, y0) = (c as usize * cell_w, r as usize * cell_h);
                 if pass == 0 {
                     if bg != bg0 {

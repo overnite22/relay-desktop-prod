@@ -45,6 +45,7 @@ pub fn update_flags(ui: &AppWindow) {
         };
         ui.set_status_path(folder_path(&s.tree, folder.as_deref()).into());
         ui.set_ctx_ssh(ssh_targets(s).len() as i32);
+        ui.set_marked_count(s.marked.len() as i32);
     });
 }
 
@@ -249,7 +250,9 @@ pub fn act(ui: &AppWindow, id: &str) {
         return;
     }
     match id {
+        "open" if multisel::active() => multisel::open_all(ui),
         "open" => open_session(ui, false),
+        "move" => multisel::move_dialog(ui),
         "new" => open_entry_dialog(ui, None),
         "new-rdp" | "new-ssh" => {
             open_entry_dialog(ui, None);
@@ -299,6 +302,11 @@ pub fn act(ui: &AppWindow, id: &str) {
             rebuild(ui);
         }
         "dash" => ui.set_active_tab(-1),
+        "fullscreen" => {
+            if active_session(ui, |x| x.rdp.as_mut().map(|r| r.enter_full_screen())).flatten() != Some(true) {
+                ui.set_status("Plein écran : ouvrez d'abord une session RDP connectée.".into());
+            }
+        }
         "about" => ui.set_dialog("about".into()),
         "test-connection" => {
             let Some(e) = with(|s| current_entry(s)).filter(testable) else {
@@ -800,7 +808,16 @@ fn submit_quick(ui: &AppWindow) {
             }
             Ok(Launch::Pve(c)) => {
                 close_dialog(ui);
-                open_pve(ui, &launched, c);
+                open_pve(ui, &launched, pve::Target::Relay(c));
+            }
+            Ok(Launch::Vnc(password)) => {
+                close_dialog(ui);
+                let target = pve::Target::Direct {
+                    host: launched.host.clone(),
+                    port: launched.port,
+                    password: password.unwrap_or_default(),
+                };
+                open_pve(ui, &launched, target);
             }
             Err(e) => fail(ui, e),
         },

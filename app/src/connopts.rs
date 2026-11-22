@@ -2,7 +2,7 @@
 //! settings stored in the `settings` object of the entry (see core::conn).
 
 use super::*;
-use relay_desktop_core::conn::{Audio, Gateway, COLOR_DEPTHS, RDP_SECURITY, SSH_SCHEMES, TERM_FONTS};
+use relay_desktop_core::conn::{Audio, Gateway, KeyHook, COLOR_DEPTHS, RDP_SECURITY, SSH_SCHEMES, TERM_FONTS};
 
 fn num(v: u32) -> SharedString {
     if v == 0 {
@@ -43,6 +43,7 @@ pub fn load(ui: &AppWindow, e: &Entry) {
     ui.set_er_drives(r.drives);
     ui.set_er_printers(r.printers);
     ui.set_er_audio(Audio::ALL.iter().position(|a| *a == r.audio).unwrap_or(0) as i32);
+    ui.set_er_keys(KeyHook::ALL.iter().position(|k| *k == r.keyboard).unwrap_or(0) as i32);
     ui.set_er_console(r.console);
     ui.set_er_security(RDP_SECURITY.iter().position(|s| *s == r.security).unwrap_or(0) as i32);
     ui.set_er_ignore_cert(r.ignore_cert == Some(true));
@@ -90,6 +91,7 @@ pub fn store(ui: &AppWindow, e: &mut Entry) -> Result<(), String> {
                 drives: ui.get_er_drives(),
                 printers: ui.get_er_printers(),
                 audio: Audio::ALL.get(pick(ui.get_er_audio())).copied().unwrap_or_default(),
+                keyboard: KeyHook::ALL.get(pick(ui.get_er_keys())).copied().unwrap_or_default(),
                 console: ui.get_er_console(),
                 security: RDP_SECURITY.get(pick(ui.get_er_security())).copied().unwrap_or("any").into(),
                 // Unchecked keeps the web default (absent) unless the entry had a value.
@@ -162,6 +164,7 @@ pub fn open_options(ui: &AppWindow) {
         let font = o.term_font.as_deref().unwrap_or("Consolas");
         ui.set_o_font(TERM_FONTS.iter().position(|(n, _)| n.eq_ignore_ascii_case(font)).unwrap_or(0) as i32);
         ui.set_o_font_size(num(o.term_font_size));
+        ui.set_o_copy_select(o.term_copy_on_select);
         let res = Resolution::from_key(o.rdp_resolution.as_deref().unwrap_or("")).or(Resolution::Fit);
         ui.set_o_rdp_res(GLOBAL_RES.iter().position(|r| *r == res).unwrap_or(0) as i32);
         ui.set_o_rdp_width(num(o.rdp_width));
@@ -199,6 +202,7 @@ pub fn submit_options(ui: &AppWindow) {
         o.auto_update = ui.get_o_auto_update();
         o.term_font = TERM_FONTS.get(ui.get_o_font().max(0) as usize).map(|(n, _)| n.to_string());
         o.term_font_size = size;
+        o.term_copy_on_select = ui.get_o_copy_select();
         o.rdp_resolution = Some(res.key().into());
         (o.rdp_width, o.rdp_height) = if res == Resolution::Fixed { (w, h) } else { (0, 0) };
         o.save()

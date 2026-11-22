@@ -1,13 +1,14 @@
 //! Interactive SSH sessions for embedded terminals (russh, pure Rust).
 //!
 //! Host keys are pinned per `host:port` in a JSON file: the first key seen is
-//! recorded (trust on first use) and any later change aborts the connection.
+//! recorded (trust on first use); a later change aborts the connection and is
+//! reported with both fingerprints so the user can trust the new key.
 
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::ChannelMsg;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -39,7 +40,41 @@ pub enum Event {
         new_key: bool,
     },
     Data(Vec<u8>),
+    /// The pinned host key differs (sent just before `Closed`).
+    KeyChanged(KeyChange),
     Closed(Option<String>),
+}
+
+/// A host key that no longer matches the pinned one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyChange {
+    /// `host:port` entry of the known hosts file.
+    pub host_id: String,
+    /// SHA256 fingerprints of the pinned and of the presented keys.
+    pub old: String,
+    pub new: String,
+    /// Presented key (OpenSSH line), pinned by [`trust_key`].
+    pub key: String,
+}
+
+impl KeyChange {
+    pub fn message(&self) -> String {
+        format!("la clé d'hôte de {} a changé ({}) : connexion refusée", self.host_id, self.new)
+    }
+}
+
+/// SHA256 fingerprint of an OpenSSH public key line.
+pub fn fingerprint(line: &str) -> Option<String> {
+    russh::keys::PublicKey::from_openssh(line.trim())
+        .ok()
+        .map(|k| k.fingerprint(HashAlg::Sha256).to_string())
+}
+
+/// Pins the new key of a [`KeyChange`] ("Faire confiance à la nouvelle clé").
+pub fn trust_key(known_hosts: &Path, change: &KeyChange) -> std::io::Result<()> {
+    let mut known = load_known(known_hosts);
+    known.insert(change.host_id.clone(), change.key.clone());
+    save_known(known_hosts, &known)
 }
 
 #[derive(Debug)]
@@ -52,7 +87,8 @@ pub enum Input {
 enum KeyCheck {
     Known(String),
     New(String),
-    Changed(String),
+    Changed(KeyChange),
+    Refused(String),
 }
 
 struct Client {
@@ -61,11 +97,18 @@ struct Client {
     check: Arc<Mutex<Option<KeyCheck>>>,
 }
 
-fn load_known(path: &PathBuf) -> BTreeMap<String, String> {
+fn load_known(path: &Path) -> BTreeMap<String, String> {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
+}
+
+fn save_known(path: &Path, known: &BTreeMap<String, String>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(known).unwrap_or_default())
 }
 
 impl client::Handler for Client {
@@ -73,7 +116,7 @@ impl client::Handler for Client {
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let PublicKeyOrCertificate::PublicKey { key, .. } = key else {
-            *self.check.lock().unwrap() = Some(KeyCheck::Changed("certificat d'hôte non pris en charge".into()));
+            *self.check.lock().unwrap() = Some(KeyCheck::Refused("certificat d'hôte non pris en charge".into()));
             return Ok(false);
         };
         let fp = key.fingerprint(HashAlg::Sha256).to_string();
@@ -81,17 +124,19 @@ impl client::Handler for Client {
         let mut known = load_known(&self.known_hosts);
         let verdict = match known.get(&self.host_id) {
             Some(k) if *k == line => KeyCheck::Known(fp),
-            Some(_) => KeyCheck::Changed(fp),
+            Some(old) => KeyCheck::Changed(KeyChange {
+                host_id: self.host_id.clone(),
+                old: fingerprint(old).unwrap_or_else(|| "illisible".into()),
+                new: fp,
+                key: line,
+            }),
             None => {
                 known.insert(self.host_id.clone(), line);
-                if let Some(dir) = self.known_hosts.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let _ = std::fs::write(&self.known_hosts, serde_json::to_vec_pretty(&known).unwrap_or_default());
+                let _ = save_known(&self.known_hosts, &known);
                 KeyCheck::New(fp)
             }
         };
-        let ok = !matches!(verdict, KeyCheck::Changed(_));
+        let ok = matches!(verdict, KeyCheck::Known(_) | KeyCheck::New(_));
         *self.check.lock().unwrap() = Some(verdict);
         Ok(ok)
     }
@@ -109,8 +154,9 @@ pub fn spawn(rt: &tokio::runtime::Handle, p: Params, events: impl Fn(Event) + Se
     tx
 }
 
-/// Connects, checks the pinned host key and authenticates.
-async fn open(p: &Params) -> Result<(client::Handle<Client>, String, bool), String> {
+/// Connects, checks the pinned host key and authenticates; a changed host key
+/// is also returned in `changed`.
+async fn open(p: &Params, changed: &mut Option<KeyChange>) -> Result<(client::Handle<Client>, String, bool), String> {
     let check = Arc::new(Mutex::new(None));
     let handler = Client {
         host_id: format!("{}:{}", p.host, p.port),
@@ -127,7 +173,12 @@ async fn open(p: &Params) -> Result<(client::Handle<Client>, String, bool), Stri
         Err(_) => return Err(format!("{}:{} ne répond pas", p.host, p.port)),
         Ok(Err(e)) => {
             return Err(match check.lock().unwrap().take() {
-                Some(KeyCheck::Changed(fp)) => format!("la clé d'hôte de {} a changé ({fp}) : connexion refusée", p.host),
+                Some(KeyCheck::Changed(k)) => {
+                    let msg = k.message();
+                    *changed = Some(k);
+                    msg
+                }
+                Some(KeyCheck::Refused(why)) => format!("clé d'hôte refusée : {why}"),
                 _ => format!("connexion impossible : {e}"),
             })
         }
@@ -224,7 +275,12 @@ where
 }
 
 async fn run(p: Params, mut rx: mpsc::UnboundedReceiver<Input>, events: impl Fn(Event)) -> Result<(), String> {
-    let (session, fingerprint, new_key) = open(&p).await?;
+    let mut changed = None;
+    let opened = open(&p, &mut changed).await;
+    if let Some(k) = changed {
+        events(Event::KeyChanged(k));
+    }
+    let (session, fingerprint, new_key) = opened?;
     let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
     channel
         .request_pty(false, "xterm-256color", p.cols.into(), p.rows.into(), 0, 0, &[])
@@ -265,7 +321,7 @@ pub struct ExecOutput {
 /// Runs `command` without a terminal; stdout and stderr are merged and kept
 /// up to `max_output` bytes. `stdin` is written first (sudo password).
 pub async fn exec(p: &Params, command: &str, stdin: Option<Zeroizing<String>>, max_output: usize) -> Result<ExecOutput, String> {
-    let (session, fingerprint, new_key) = open(p).await?;
+    let (session, fingerprint, new_key) = open(p, &mut None).await?;
     let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.exec(true, command).await.map_err(|e| e.to_string())?;
     if let Some(input) = stdin {
@@ -297,4 +353,42 @@ pub async fn exec(p: &Params, command: &str, stdin: Option<Zeroizing<String>>, m
     let _ = session.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     out.output = String::from_utf8_lossy(&buf).into_owned();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILQVkpVq0hrQctVoP4nMSPXxTz0apeHg3cgscn6o92Q+";
+
+    #[test]
+    fn trust_new_key() {
+        assert_eq!(
+            fingerprint(KEY).as_deref(),
+            Some("SHA256:b9mGdcaAQUTqkdZl25dEunmFN1ZVneY/mLOpNn925AM")
+        );
+        assert_eq!(fingerprint("pas une clé"), None);
+        let dir = std::env::temp_dir().join(format!("relay-kh-{}", std::process::id()));
+        let path = dir.join("known_hosts.json");
+        save_known(
+            &path,
+            &BTreeMap::from([
+                ("h:22".to_string(), "ancienne".to_string()),
+                ("x:22".to_string(), "autre".to_string()),
+            ]),
+        )
+        .unwrap();
+        let change = KeyChange {
+            host_id: "h:22".into(),
+            old: "illisible".into(),
+            new: "SHA256:b9mG".into(),
+            key: KEY.into(),
+        };
+        assert!(change.message().contains("h:22"));
+        trust_key(&path, &change).unwrap();
+        let known = load_known(&path);
+        assert_eq!(known.get("h:22").map(String::as_str), Some(KEY));
+        assert_eq!(known.get("x:22").map(String::as_str), Some("autre"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

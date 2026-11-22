@@ -237,6 +237,21 @@ mod imp {
         std::mem::ManuallyDrop::into_inner(disp).ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_NOINTERFACE))
     }
 
+    fn get_bool(d: &IDispatch, name: &str) -> windows::core::Result<bool> {
+        let mut r = invoke(d, name, DISPATCH_PROPERTYGET, vec![])?;
+        let v = unsafe {
+            let inner = &*r.Anonymous.Anonymous;
+            match inner.vt {
+                VT_BOOL => inner.Anonymous.boolVal.0 != 0,
+                _ => inner.Anonymous.lVal != 0,
+            }
+        };
+        unsafe {
+            let _ = VariantClear(&mut r);
+        }
+        Ok(v)
+    }
+
     fn get_i32(d: &IDispatch, name: &str) -> windows::core::Result<i32> {
         let mut r = invoke(d, name, DISPATCH_PROPERTYGET, vec![])?;
         let v = unsafe {
@@ -460,7 +475,9 @@ mod imp {
             let _ = put(&adv, "RedirectDrives", v_bool(o.drives));
             let _ = put(&adv, "RedirectPrinters", v_bool(o.printers));
             let _ = put(&adv, "EnableAutoReconnect", v_bool(true));
-            let _ = put(&adv, "SmartSizing", v_bool(!full));
+            // Scales a fixed size to the tab, and the desktop after leaving full screen;
+            // no effect in full screen (the window is the size of the monitor).
+            let _ = put(&adv, "SmartSizing", v_bool(true));
             let _ = put(&adv, "GrabFocusOnConnect", v_bool(true));
             let mut perf = PERF_FONT_SMOOTHING | PERF_COMPOSITION;
             if !o.wallpaper {
@@ -472,6 +489,7 @@ mod imp {
             }
             if let Ok(sec) = get_dispatch(ax, "SecuredSettings2") {
                 let _ = put(&sec, "AudioRedirectionMode", v_i4(o.audio.mode()));
+                let _ = put(&sec, "KeyboardHookMode", v_i4(o.keyboard.mode()));
             }
             if o.gateway != Gateway::None {
                 let ts = get_dispatch(ax, "TransportSettings2").or_else(|_| get_dispatch(ax, "TransportSettings"))?;
@@ -482,11 +500,12 @@ mod imp {
                 let _ = put(&ts, "GatewayCredsSource", v_i4(4));
                 let _ = put(&ts, "GatewayCredSharing", v_i4(i32::from(o.gateway_same_creds)));
             }
+            // The control handles full screen itself (connection bar, "restore" back to the tab).
+            let _ = put(&adv, "ContainerHandledFullScreen", v_i4(0));
+            let _ = put(&adv, "DisplayConnectionBar", v_bool(true));
+            let _ = put(&adv, "PinConnectionBar", v_bool(true));
+            let _ = put(ax, "FullScreenTitle", v_str(&p.host));
             if full {
-                let _ = put(&adv, "ContainerHandledFullScreen", v_i4(0));
-                let _ = put(&adv, "DisplayConnectionBar", v_bool(true));
-                let _ = put(&adv, "PinConnectionBar", v_bool(true));
-                let _ = put(ax, "FullScreenTitle", v_str(&p.host));
                 if o.multi_mon {
                     let _ = put_nonscriptable_bool(unk, "UseMultimon", true);
                 }
@@ -569,6 +588,12 @@ mod imp {
             if !self.fit || (width, height) == self.size || self.state() != State::Connected {
                 return;
             }
+            if !self.full_screen() {
+                self.update_display(width, height);
+            }
+        }
+
+        fn update_display(&mut self, width: u32, height: u32) {
             let args = vec![
                 v_i4(width as i32),
                 v_i4(height as i32),
@@ -581,6 +606,24 @@ mod imp {
             if invoke(&self.ax, "UpdateSessionDisplaySettings", DISPATCH_METHOD, args).is_ok() {
                 self.size = (width, height);
             }
+        }
+
+        fn full_screen(&self) -> bool {
+            get_bool(&self.ax, "FullScreen").unwrap_or(false)
+        }
+
+        /// Switches a connected session to full screen (the connection bar brings it
+        /// back to the tab); a session that follows the tab takes the monitor size.
+        pub fn enter_full_screen(&mut self) -> bool {
+            if self.state() != State::Connected || self.full_screen() {
+                return false;
+            }
+            if self.fit {
+                if let Some((w, h)) = monitor_size(self.hwnd) {
+                    self.update_display(w & !1, h);
+                }
+            }
+            put(&self.ax, "FullScreen", v_bool(true)).is_ok()
         }
 
         pub fn disconnect(&self) {
@@ -620,5 +663,8 @@ impl RdpSession {
     pub fn focus(&self) {}
     pub fn place(&mut self, _: (i32, i32, i32, i32), _: bool) {}
     pub fn resize_desktop(&mut self, _: u32, _: u32) {}
+    pub fn enter_full_screen(&mut self) -> bool {
+        false
+    }
     pub fn disconnect(&self) {}
 }
