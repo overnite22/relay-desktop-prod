@@ -3,6 +3,7 @@
 
 use super::*;
 use relay_desktop_core::admin::{DuplicateGroup, ImportOptions, ImportPlan, Recording, SyncSource};
+use relay_desktop_core::guac;
 
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Mode {
@@ -259,7 +260,7 @@ fn action(ui: &AppWindow, n: usize) {
                 },
             );
         }
-        (Mode::Duplicates, 1) | (Mode::Sources, 5) | (Mode::Recordings, 1) => reload(ui),
+        (Mode::Duplicates, 1) | (Mode::Sources, 5) | (Mode::Recordings, 2) => reload(ui),
         (Mode::Sources, 2) => open_source_editor(ui, None),
         (Mode::Sources, 3 | 4) => {
             let Some(x) = selected(ui, |s| &s.admin.sources) else {
@@ -291,6 +292,27 @@ fn action(ui: &AppWindow, n: usize) {
             );
         }
         (Mode::Recordings, 0) => {
+            let Some(x) = selected(ui, |s| &s.admin.recordings) else {
+                return fail(ui, "Sélectionnez un enregistrement.");
+            };
+            bg(
+                ui,
+                "Téléchargement de l'enregistrement…",
+                move || {
+                    let data = src.recording_data(&x.id)?;
+                    let rec = guac::Recording::parse(&data).map_err(Error::Server)?;
+                    Ok((x, rec))
+                },
+                |ui, r| match r {
+                    Ok((x, rec)) => {
+                        close_dialog(ui);
+                        replay::open(ui, &x.name, &x.kind, rec);
+                    }
+                    Err(e) => fail(ui, e),
+                },
+            );
+        }
+        (Mode::Recordings, 1) => {
             let Some(x) = selected(ui, |s| &s.admin.recordings) else {
                 return fail(ui, "Sélectionnez un enregistrement.");
             };
@@ -626,8 +648,8 @@ pub fn act(ui: &AppWindow, id: &str) -> bool {
             ui,
             Mode::Recordings,
             "Enregistrements de sessions",
-            "Sessions enregistrées par le serveur Relay. La relecture se fait encore dans Relay web.",
-            &[("Supprimer", true), ("Actualiser", false)],
+            "Sessions enregistrées par le serveur Relay : « Lire » les rejoue dans un onglet (lecture, pause, position, vitesse).",
+            &[("Lire", true), ("Supprimer", true), ("Actualiser", false)],
         ),
         "adm-select" => {}
         "import" => {

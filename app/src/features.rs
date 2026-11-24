@@ -302,6 +302,8 @@ pub fn act(ui: &AppWindow, id: &str) {
             rebuild(ui);
         }
         "dash" => ui.set_active_tab(-1),
+        "sftp" => files::open(ui),
+        "hl-rules" => connopts::open_rules(ui),
         "fullscreen" => {
             if active_session(ui, |x| x.rdp.as_mut().map(|r| r.enter_full_screen())).flatten() != Some(true) {
                 ui.set_status("Plein écran : ouvrez d'abord une session RDP connectée.".into());
@@ -594,6 +596,7 @@ pub fn submit(ui: &AppWindow) -> bool {
     match ui.get_dialog().as_str() {
         "quick" => submit_quick(ui),
         "options" => connopts::submit_options(ui),
+        "hl-rules" => connopts::submit_rules(ui),
         "sync-src" => admin::submit_source(ui),
         "folder-creds" => {
             let (Some(src), Some(f)) = (source(), with(|s| current_folder(s))) else {

@@ -1,21 +1,15 @@
-Relay Desktop 0.1.3
+Relay Desktop 0.1.4
 
-- SSH terminal: mouse selection (drag, double-click word, triple-click line, Shift+click to extend, scrollback), copy and paste from the keyboard like Windows Terminal (Ctrl+C copies when text is selected, Ctrl+V, Shift+Insert, right-click, middle-click), optional copy on select, safe multi-line paste, mouse support for full-screen applications (Shift+drag still selects)
-- SSH: clear dialog when a host key changes, with the old and new fingerprints
-- Native VNC sessions in tabs, with clipboard in both directions and faster ZRLE/CopyRect encodings
-- Tree: drag and drop, multi-selection (Ctrl/Shift), grouped open/move/delete
-- Keyboard shortcuts: Ctrl+F, F5, Ctrl+W, Ctrl+Tab / Ctrl+Shift+Tab
-- Embedded RDP: correct initial size, full screen from View and back to the tab, per-entry "Windows keys" setting, status bar follows the active tab
-
-The MSI is not code-signed yet: Windows SmartScreen may show a warning.
+- SSH sessions now have a built-in SFTP file browser with drag-and-drop uploads, downloads, file and folder actions, transfer progress and cancellation.
+- Server recordings can be played directly in Relay Desktop. Playback controls include pause, seeking and speed.
+- The SSH terminal handles AltGr characters on French keyboards, uses fallback fonts for missing glyphs and supports legacy character sets alongside UTF-8.
+- The SSH terminal offers colour themes and configurable syntax highlighting, with per-entry overrides.
+- Updated Slint to 1.19.0 to pick up the Windows repaint fix for areas that could become transparent when restoring or resizing the window.
 
 ---
 
-- Terminal SSH : sélection à la souris (glisser, double-clic mot, triple-clic ligne, Maj+clic, historique), copier-coller au clavier comme Windows Terminal (Ctrl+C copie s'il y a une sélection, Ctrl+V, Maj+Inser, clic droit, clic molette), copie à la sélection en option, collage multi-ligne protégé, souris pour les applications plein écran (Maj+glisser sélectionne toujours)
-- SSH : dialogue clair quand la clé d'un serveur change, avec l'ancienne et la nouvelle empreinte
-- Sessions VNC natives dans des onglets, presse-papiers dans les deux sens, encodages ZRLE/CopyRect plus fluides
-- Arborescence : glisser-déposer, sélection multiple (Ctrl/Maj), ouverture, déplacement et suppression groupés
-- Raccourcis : Ctrl+F, F5, Ctrl+W, Ctrl+Tab / Ctrl+Maj+Tab
-- RDP intégré : bonne taille au démarrage, plein écran depuis Affichage et retour à l'onglet, réglage « Touches Windows » par entrée, barre d'état qui suit l'onglet actif
-
-Le MSI n'est pas encore signé : SmartScreen peut afficher un avertissement.
+- Les sessions SSH disposent d'un navigateur SFTP intégré avec téléversement par glisser-déposer, téléchargement, gestion des fichiers et dossiers, suivi et annulation des transferts.
+- Les enregistrements du serveur se lisent directement dans Relay Desktop, avec pause, déplacement dans l'enregistrement et réglage de la vitesse.
+- Le terminal SSH gère les caractères AltGr des claviers français, utilise des polices de secours pour les glyphes manquants et prend en charge des jeux de caractères anciens en plus d'UTF-8.
+- Le terminal SSH propose des thèmes et des règles de coloration configurables, avec des réglages par entrée.
+- Slint passe à la version 1.19.0, qui corrige le rafraîchissement des zones pouvant devenir transparentes à la restauration ou au redimensionnement de la fenêtre sous Windows.

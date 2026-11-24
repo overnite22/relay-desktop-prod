@@ -83,7 +83,7 @@ fn paste(ui: &AppWindow) {
         t.clear_selection();
         t.scroll(-1_000_000);
         input
-            .send(ssh::Input::Data(termsel::paste_bytes(&text, bracketed)))
+            .send(ssh::Input::Data(t.encode_input(termsel::paste_bytes(&text, bracketed))))
             .ok()
             .map(|_| bracketed)
     })
@@ -132,6 +132,7 @@ fn on_key(ui: &AppWindow, text: SharedString, ctrl: bool, alt: bool, shift: bool
         let Some(bytes) = term::key_bytes(&text, ctrl, alt, t.application_cursor()) else {
             return false;
         };
+        let bytes = t.encode_input(bytes);
         t.clear_selection();
         t.scroll(-1_000_000);
         input.send(ssh::Input::Data(bytes)).is_ok()

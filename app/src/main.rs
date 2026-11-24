@@ -6,11 +6,13 @@ mod admin;
 mod bulk;
 mod connopts;
 mod features;
+mod files;
 mod multisel;
 mod notes;
 mod pve;
 mod rdp;
 mod recorder;
+mod replay;
 mod session;
 mod settings;
 mod term;
@@ -94,6 +96,10 @@ struct Session {
     rec: Option<recorder::Recorder>,
     /// Replay of a recording.
     player: Option<recorder::Player>,
+    /// SFTP browser ("Fichiers" tab of an SSH session).
+    files: Option<files::FilesTab>,
+    /// Replay of a server recording.
+    replay: Option<Box<replay::Replay>>,
 }
 
 struct RdpCreds {
@@ -666,7 +672,7 @@ fn fail(ui: &AppWindow, msg: impl ToString) {
 }
 
 fn submit(ui: &AppWindow) {
-    if features::submit(ui) || notes::submit(ui) {
+    if features::submit(ui) || notes::submit(ui) || files::submit(ui) {
         return;
     }
     match ui.get_dialog().as_str() {
@@ -982,6 +988,9 @@ fn host_key_changed(ui: &AppWindow, session: u64, change: ssh::KeyChange) {
 
 /// "Reconnecter" on a closed tab: opens the entry again in the same tab.
 fn reconnect_tab(ui: &AppWindow) {
+    if ui.get_active_kind() == "files" {
+        return files::reconnect(ui);
+    }
     let Some((id, entry_id)) = active_session(ui, |x| (x.id, x.entry_id.clone())) else {
         return;
     };
@@ -1116,6 +1125,8 @@ fn open_pve(ui: &AppWindow, entry: &Entry, target: pve::Target) {
                 pt: 0.0,
                 rec: None,
                 player: None,
+                files: None,
+                replay: None,
             },
         )
     });
@@ -1174,6 +1185,12 @@ fn redraw(ui: &AppWindow) {
         ui.set_session_banner(banner.into());
         ui.set_session_closed(closed);
         ui.set_active_kind(kind.into());
+        if kind == "files" {
+            files::show(ui);
+        }
+        if kind == "replay" {
+            replay::show(ui);
+        }
     }
 }
 
@@ -1211,6 +1228,17 @@ fn session_event(weak: slint::Weak<AppWindow>, id: u64, state: &'static str, ban
                 x.state = state;
                 x.banner = banner.clone();
             }
+            // The files tabs of a closed SSH session lose their SFTP channel.
+            if state == "closed" {
+                for x in s
+                    .sessions
+                    .iter_mut()
+                    .filter(|x| x.files.as_ref().is_some_and(|f| f.terminal() == id))
+                {
+                    x.state = "closed";
+                    x.banner = "Session SSH fermée : reconnectez-la, puis « Reconnecter » ici.".into();
+                }
+            }
         });
         if !banner.is_empty() {
             ui.set_status(banner.into());
@@ -1242,13 +1270,36 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
     };
     let scale = ui.window().scale_factor();
     ui.set_scale(scale);
-    let (fg, bg) = opts.colors();
+    let (theme_key, bold_bright, highlight_on, rules) = with(|s| {
+        (
+            s.settings.term_theme.clone(),
+            s.settings.term_bold_bright,
+            s.settings.term_highlight,
+            s.settings.term_rules.clone(),
+        )
+    });
+    let theme = relay_desktop_core::termtheme::theme_of(if opts.theme.is_empty() { &theme_key } else { &opts.theme });
+    // The web colour schemes ("Vert sur noir"…) keep their text and background.
+    let (fg, bg) = if opts.color_scheme.is_empty() {
+        (theme.fg, theme.bg)
+    } else {
+        opts.colors()
+    };
     let style = term::Style {
+        theme,
         fg,
         bg,
         scrollback: if opts.scrollback > 0 { opts.scrollback as usize } else { 5000 },
+        bold_bright,
     };
-    let term = Arc::new(Mutex::new(term::Term::new(fonts, (pt * scale).round(), 30, 100, style)));
+    let mut t = term::Term::new(fonts, (pt * scale).round(), 30, 100, style);
+    t.charset = opts.charset;
+    if opts.highlight.unwrap_or(highlight_on) {
+        let rules = rules.unwrap_or_else(relay_desktop_core::highlight::default_rules);
+        t.set_highlight(Some(Arc::new(relay_desktop_core::highlight::Highlighter::new(&rules).0)));
+    }
+    let charset = opts.charset;
+    let term = Arc::new(Mutex::new(t));
     let redraw_flag = Arc::new(AtomicBool::new(false));
     let id = with(|s| {
         s.next_session += 1;
@@ -1267,6 +1318,7 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
         keepalive: opts.keepalive_secs(),
         agent: opts.agent,
         key_file: Some(opts.key_file.trim()).filter(|f| !f.is_empty()).map(PathBuf::from),
+        env: if opts.send_locale { locale_env(opts.charset) } else { Vec::new() },
     };
     let (weak, t2, flag) = (ui.as_weak(), term.clone(), redraw_flag.clone());
     // "Ouvrir et enregistrer": asciicast file next to the settings.
@@ -1284,6 +1336,7 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
     let rec2 = recorder.clone();
     let input = ssh::spawn(rt().handle(), params, move |ev| match ev {
         ssh::Event::Data(d) => {
+            let d = charset.decode(&d);
             t2.lock().unwrap().feed(&d);
             if let Some(r) = &rec2 {
                 r.output(&d);
@@ -1354,6 +1407,8 @@ fn open_ssh(ui: &AppWindow, entry: &Entry, c: SshCreds) {
                 pt,
                 rec: recorder,
                 player: None,
+                files: None,
+                replay: None,
             },
         )
     });
@@ -1437,6 +1492,8 @@ fn open_rdp(ui: &AppWindow, entry: &Entry, c: RdpCreds) {
                         pt: 0.0,
                         rec: None,
                         player: None,
+                        files: None,
+                        replay: None,
                     },
                 )
             });
@@ -1767,6 +1824,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.invoke_tab_activated(next);
             }
             "close-tab" if active >= 0 => ui.invoke_tab_closed(active),
+            "reload" if ui.get_active_kind() == "files" => files::act(&ui, "refresh"),
             "reload" if ui.get_connected() => features::act(&ui, "reload"),
             _ => {}
         }
@@ -1891,6 +1949,57 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let _term_timer = termui::install(&ui);
+    let _files_timer = files::install(&ui);
+    connopts::init_lists(&ui);
+    let w = ui.as_weak();
+    ui.on_hl_act(move |a| {
+        if let Some(ui) = w.upgrade() {
+            connopts::rules_act(&ui, &a);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_rp_toggle(move || {
+        if let Some(ui) = w.upgrade() {
+            replay::toggle(&ui);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_rp_seek(move |v| {
+        if let Some(ui) = w.upgrade() {
+            replay::seek(&ui, v);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_rp_speed_changed(move |i| {
+        if let Some(ui) = w.upgrade() {
+            replay::set_speed(&ui, i);
+        }
+    });
+    files::watch_drops(&ui);
+    let w = ui.as_weak();
+    ui.on_fb_act(move |a| {
+        if let Some(ui) = w.upgrade() {
+            files::act(&ui, &a);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_fb_open(move |i| {
+        if let Some(ui) = w.upgrade() {
+            files::open_row(&ui, i);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_fb_sort_by(move |k| {
+        if let Some(ui) = w.upgrade() {
+            files::sort_by(&ui, k);
+        }
+    });
+    let w = ui.as_weak();
+    ui.on_fb_cancel(move |i| {
+        if let Some(ui) = w.upgrade() {
+            files::cancel(&ui, i);
+        }
+    });
 
     let w = ui.as_weak();
     ui.on_session_area(move |x, y, width, height| {
@@ -1911,6 +2020,7 @@ fn main() -> Result<(), slint::PlatformError> {
     pve_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(40), move || {
         if let Some(ui) = w.upgrade() {
             recorder::tick(&ui);
+            replay::tick(&ui);
             if ui.get_active_kind() == "pve" {
                 redraw(&ui);
             }
@@ -1953,4 +2063,27 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_add_source();
     }
     ui.run()
+}
+
+/// LANG and LC_ALL for the remote shell: language of this Windows session
+/// with the codeset of the entry's character set (`fr_FR.UTF-8`).
+fn locale_env(charset: relay_desktop_core::charset::Charset) -> Vec<(String, String)> {
+    let Some(codeset) = charset.locale_codeset() else {
+        return Vec::new();
+    };
+    let lang = windows_locale().unwrap_or_else(|| "en_US".into());
+    let value = format!("{lang}.{codeset}");
+    vec![("LANG".into(), value.clone()), ("LC_ALL".into(), value)]
+}
+
+#[cfg(windows)]
+fn windows_locale() -> Option<String> {
+    let mut buf = [0u16; 85];
+    let n = unsafe { windows::Win32::Globalization::GetUserDefaultLocaleName(&mut buf) };
+    (n > 1).then(|| String::from_utf16_lossy(&buf[..n as usize - 1]).replace('-', "_"))
+}
+
+#[cfg(not(windows))]
+fn windows_locale() -> Option<String> {
+    None
 }

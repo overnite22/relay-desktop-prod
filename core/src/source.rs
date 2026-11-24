@@ -120,6 +120,10 @@ pub trait DataSource: Send + Sync {
     fn recordings(&self) -> Result<Vec<Recording>> {
         Err(server_only())
     }
+    /// Raw Guacamole protocol of a recording (see [`crate::guac`]).
+    fn recording_data(&self, _id: &str) -> Result<String> {
+        Err(server_only())
+    }
     fn delete_recording(&self, _id: &str) -> Result<()> {
         Err(server_only())
     }

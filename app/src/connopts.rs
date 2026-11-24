@@ -2,7 +2,10 @@
 //! settings stored in the `settings` object of the entry (see core::conn).
 
 use super::*;
+use relay_desktop_core::charset::{Charset, CHARSETS};
 use relay_desktop_core::conn::{Audio, Gateway, KeyHook, COLOR_DEPTHS, RDP_SECURITY, SSH_SCHEMES, TERM_FONTS};
+use relay_desktop_core::highlight::{self, Rule};
+use relay_desktop_core::termtheme;
 
 fn num(v: u32) -> SharedString {
     if v == 0 {
@@ -66,6 +69,18 @@ pub fn load(ui: &AppWindow, e: &Entry) {
     ui.set_es_keepalive(s.keepalive.map(|v| SharedString::from(v.to_string())).unwrap_or_default());
     ui.set_es_agent(s.agent);
     ui.set_es_keyfile(s.key_file.into());
+    ui.set_es_charset(s.charset.index() as i32);
+    ui.set_es_send_locale(s.send_locale);
+    ui.set_es_theme(if s.theme.is_empty() {
+        0
+    } else {
+        termtheme::index_of(&s.theme) as i32 + 1
+    });
+    ui.set_es_highlight(match s.highlight {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    });
 }
 
 /// Writes the section into `e.settings` (only the options of its kind).
@@ -128,6 +143,17 @@ pub fn store(ui: &AppWindow, e: &mut Entry) -> Result<(), String> {
                 },
                 agent: ui.get_es_agent(),
                 key_file: ui.get_es_keyfile().trim().into(),
+                charset: CHARSETS.get(ui.get_es_charset().max(0) as usize).map_or(Charset::Utf8, |c| c.0),
+                send_locale: ui.get_es_send_locale(),
+                theme: match ui.get_es_theme() {
+                    i if i > 0 => termtheme::THEMES.get(i as usize - 1).map(|t| t.key.to_string()).unwrap_or_default(),
+                    _ => String::new(),
+                },
+                highlight: match ui.get_es_highlight() {
+                    1 => Some(true),
+                    2 => Some(false),
+                    _ => None,
+                },
             };
             s.validate()?;
             s.apply(&mut e.settings);
@@ -165,6 +191,9 @@ pub fn open_options(ui: &AppWindow) {
         ui.set_o_font(TERM_FONTS.iter().position(|(n, _)| n.eq_ignore_ascii_case(font)).unwrap_or(0) as i32);
         ui.set_o_font_size(num(o.term_font_size));
         ui.set_o_copy_select(o.term_copy_on_select);
+        ui.set_o_term_theme(termtheme::index_of(&o.term_theme) as i32);
+        ui.set_o_bold_bright(o.term_bold_bright);
+        ui.set_o_highlight(o.term_highlight);
         let res = Resolution::from_key(o.rdp_resolution.as_deref().unwrap_or("")).or(Resolution::Fit);
         ui.set_o_rdp_res(GLOBAL_RES.iter().position(|r| *r == res).unwrap_or(0) as i32);
         ui.set_o_rdp_width(num(o.rdp_width));
@@ -203,6 +232,12 @@ pub fn submit_options(ui: &AppWindow) {
         o.term_font = TERM_FONTS.get(ui.get_o_font().max(0) as usize).map(|(n, _)| n.to_string());
         o.term_font_size = size;
         o.term_copy_on_select = ui.get_o_copy_select();
+        o.term_theme = termtheme::THEMES
+            .get(ui.get_o_term_theme().max(0) as usize)
+            .map(|t| t.key.to_string())
+            .unwrap_or_default();
+        o.term_bold_bright = ui.get_o_bold_bright();
+        o.term_highlight = ui.get_o_highlight();
         o.rdp_resolution = Some(res.key().into());
         (o.rdp_width, o.rdp_height) = if res == Resolution::Fixed { (w, h) } else { (0, 0) };
         o.save()
@@ -214,4 +249,171 @@ pub fn submit_options(ui: &AppWindow) {
     ui.set_upd_auto(ui.get_o_auto_update());
     ui.set_dialog("".into());
     ui.set_status("Options enregistrées (police et résolution : prochaines sessions).".into());
+}
+
+/// Lists of the theme, character set and colour pickers.
+pub fn init_lists(ui: &AppWindow) {
+    let names = |v: Vec<String>| ModelRc::new(VecModel::from(v.into_iter().map(SharedString::from).collect::<Vec<_>>()));
+    let themes: Vec<String> = termtheme::THEMES.iter().map(|t| t.name.to_string()).collect();
+    let mut entry = vec!["Selon les Options".to_string()];
+    entry.extend(themes.iter().cloned());
+    ui.set_term_theme_names(names(themes));
+    ui.set_es_theme_names(names(entry));
+    ui.set_charset_names(names(CHARSETS.iter().map(|c| c.2.to_string()).collect()));
+    ui.set_hl_color_names(names(highlight::COLORS.iter().map(|c| c.0.to_string()).collect()));
+}
+
+thread_local! {
+    /// Rules being edited in the "Règles de coloration" dialog.
+    static RULES: RefCell<Vec<Rule>> = const { RefCell::new(Vec::new()) };
+}
+
+fn color_index(hex: &str) -> i32 {
+    highlight::COLORS.iter().position(|c| c.1.eq_ignore_ascii_case(hex)).unwrap_or(0) as i32
+}
+
+fn color_name(hex: &str) -> &'static str {
+    highlight::COLORS.iter().find(|c| c.1.eq_ignore_ascii_case(hex)).map_or("", |c| c.0)
+}
+
+fn show_rules(ui: &AppWindow) {
+    let rows: Vec<ListRow> = RULES.with(|r| {
+        r.borrow()
+            .iter()
+            .map(|r| {
+                let mut colors = Vec::new();
+                if !r.fg.is_empty() {
+                    colors.push(color_name(&r.fg).to_string());
+                }
+                if !r.bg.is_empty() {
+                    colors.push(format!("fond {}", color_name(&r.bg).to_lowercase()));
+                }
+                if r.bold {
+                    colors.push("gras".into());
+                }
+                ListRow {
+                    name: r.pattern.clone().into(),
+                    detail: if r.regex { "Expression" } else { "Mot" }.into(),
+                    extra: colors.join(", ").into(),
+                    status: if r.enabled { 1 } else { 0 },
+                }
+            })
+            .collect()
+    });
+    ui.set_hl_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+fn load_rule(ui: &AppWindow) {
+    let i = ui.get_hl_sel();
+    let Some(r) = RULES.with(|r| r.borrow().get(usize::try_from(i).ok()?).cloned()) else {
+        ui.set_hl_sel(-1);
+        return;
+    };
+    ui.set_hl_pattern(r.pattern.into());
+    ui.set_hl_regex(r.regex);
+    ui.set_hl_case(r.case_sensitive);
+    ui.set_hl_fg(color_index(&r.fg));
+    ui.set_hl_bg(color_index(&r.bg));
+    ui.set_hl_bold(r.bold);
+    ui.set_hl_enabled(r.enabled);
+}
+
+/// Options → "Règles…": edits a copy of the rules (Options fields kept).
+pub fn open_rules(ui: &AppWindow) {
+    let rules = with(|s| s.settings.term_rules.clone()).unwrap_or_else(highlight::default_rules);
+    RULES.with(|r| *r.borrow_mut() = rules);
+    ui.set_hl_sel(-1);
+    show_rules(ui);
+    ui.set_dialog_error("".into());
+    ui.set_dialog("hl-rules".into());
+}
+
+pub fn rules_act(ui: &AppWindow, action: &str) {
+    let sel = ui.get_hl_sel();
+    let idx = usize::try_from(sel).ok();
+    match action {
+        "select" => return load_rule(ui),
+        "cancel" => {
+            ui.set_dialog_error("".into());
+            ui.set_dialog("options".into());
+            return;
+        }
+        "apply" => {
+            let color = |i: i32| highlight::COLORS.get(i.max(0) as usize).map_or(String::new(), |c| c.1.to_string());
+            let rule = Rule {
+                pattern: ui.get_hl_pattern().to_string(),
+                regex: ui.get_hl_regex(),
+                case_sensitive: ui.get_hl_case(),
+                fg: color(ui.get_hl_fg()),
+                bg: color(ui.get_hl_bg()),
+                bold: ui.get_hl_bold(),
+                enabled: ui.get_hl_enabled(),
+            };
+            let (_, errors) = highlight::Highlighter::new(std::slice::from_ref(&rule));
+            ui.set_dialog_error(errors.join(" ; ").into());
+            RULES.with(|r| {
+                let mut r = r.borrow_mut();
+                if let Some(slot) = idx.and_then(|i| r.get_mut(i)) {
+                    *slot = rule;
+                }
+            });
+        }
+        "add" => {
+            let n = RULES.with(|r| {
+                let mut r = r.borrow_mut();
+                r.push(Rule {
+                    pattern: "motif".into(),
+                    fg: highlight::COLORS[1].1.into(),
+                    ..Default::default()
+                });
+                r.len() - 1
+            });
+            ui.set_hl_sel(n as i32);
+            load_rule(ui);
+        }
+        "delete" => {
+            RULES.with(|r| {
+                if let Some(i) = idx.filter(|i| *i < r.borrow().len()) {
+                    r.borrow_mut().remove(i);
+                }
+            });
+            ui.set_hl_sel(-1);
+        }
+        "up" | "down" => {
+            let moved = RULES.with(|r| {
+                let mut r = r.borrow_mut();
+                let i = idx?;
+                let j = if action == "up" { i.checked_sub(1)? } else { i + 1 };
+                (j < r.len()).then(|| r.swap(i, j)).map(|_| j)
+            });
+            if let Some(j) = moved {
+                ui.set_hl_sel(j as i32);
+            }
+        }
+        "defaults" => {
+            RULES.with(|r| *r.borrow_mut() = highlight::default_rules());
+            ui.set_hl_sel(-1);
+        }
+        _ => {}
+    }
+    show_rules(ui);
+}
+
+/// "Enregistrer" of the rules: refused while a rule does not compile.
+pub fn submit_rules(ui: &AppWindow) {
+    let rules = RULES.with(|r| r.borrow().clone());
+    let (_, errors) = highlight::Highlighter::new(&rules);
+    if !errors.is_empty() {
+        return ui.set_dialog_error(format!("Règle invalide : {}", errors.join(" ; ")).into());
+    }
+    let saved = with(|s| {
+        s.settings.term_rules = Some(rules);
+        s.settings.save()
+    });
+    if let Err(e) = saved {
+        return ui.set_dialog_error(format!("Enregistrement des règles : {e}").into());
+    }
+    ui.set_dialog_error("".into());
+    ui.set_dialog("options".into());
+    ui.set_status("Règles enregistrées : elles s'appliquent aux prochaines sessions SSH.".into());
 }

@@ -6,7 +6,7 @@
 //! only used by the desktop client are ignored by the server (it stores the
 //! object as is) : `resolution`, `width`, `height`, `colorDepth`, `multiMon`,
 //! `redirectDrives`, `redirectPrinters`, `audioMode`, `gatewayHost`,
-//! `gatewayUsage`, `gatewaySameCreds`, `keyboardHook`, `keepalive`, `sshAgent`, `keyFile`.
+//! `gatewayUsage`, `gatewaySameCreds`, `keyboardHook`, `keepalive`, `sshAgent`, `keyFile`, `charset`, `sendLocale`, `theme`, `highlight`.
 //! Unknown keys (`drive`, `keyboardLayout`, `sftp`, Proxmox keys…) are kept.
 
 use serde_json::{Map, Value};
@@ -341,6 +341,14 @@ pub struct SshOptions {
     pub agent: bool,
     /// Private key file on this computer (used when the credential has none).
     pub key_file: String,
+    /// Remote character set (`charset`, desktop only).
+    pub charset: crate::charset::Charset,
+    /// Send LANG and LC_ALL with the local language and that character set.
+    pub send_locale: bool,
+    /// Terminal colour theme (`theme`); empty = Options.
+    pub theme: String,
+    /// Syntax colouring (`highlight`): None = Options, else on / off.
+    pub highlight: Option<bool>,
 }
 
 impl SshOptions {
@@ -356,6 +364,13 @@ impl SshOptions {
             keepalive: get_u32(s, "keepalive").map(|v| v.min(3600)),
             agent: get_bool(s, "sshAgent").unwrap_or(false),
             key_file: get_str(s, "keyFile").into(),
+            charset: crate::charset::Charset::from_key(get_str(s, "charset")),
+            send_locale: get_bool(s, "sendLocale").unwrap_or(false),
+            theme: Some(get_str(s, "theme"))
+                .filter(|v| crate::termtheme::THEMES.iter().any(|t| t.key == *v))
+                .unwrap_or("")
+                .into(),
+            highlight: get_bool(s, "highlight"),
         }
     }
 
@@ -382,6 +397,17 @@ impl SshOptions {
         }
         set_bool(s, "sshAgent", self.agent, false);
         set_str(s, "keyFile", &self.key_file);
+        set_str(s, "charset", self.charset.key());
+        set_bool(s, "sendLocale", self.send_locale, false);
+        set_str(s, "theme", &self.theme);
+        match self.highlight {
+            Some(v) => {
+                s.insert("highlight".into(), Value::from(v));
+            }
+            None => {
+                s.remove("highlight");
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {

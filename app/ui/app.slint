@@ -1,4 +1,4 @@
-import { Button, LineEdit, ComboBox, CheckBox, TextEdit, ListView, ScrollView, Palette } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, CheckBox, TextEdit, ListView, ScrollView, Palette, Slider } from "std-widgets.slint";
 
 export struct TreeRow { marked: bool, folder: bool, depth: int, expanded: bool, children: bool, name: string, kind: string, detail: string, status: int, favorite: bool }
 export struct Field { label: string, value: string }
@@ -224,6 +224,181 @@ component SbSep inherits Rectangle {
     background: #ffffff59;
 }
 
+// One line of the SFTP browser and one transfer.
+export struct FileRow { name: string, dir: bool, link: bool, size: string, date: string, perms: string }
+export struct XferRow { name: string, up: bool, progress: float, detail: string, running: bool, failed: bool }
+
+// Column header of the SFTP browser: click = sort, again = reverse.
+component FbHeader inherits Rectangle {
+    in property <string> label;
+    in property <int> key;
+    in property <int> sort;
+    in property <bool> desc;
+    callback clicked(int);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(root.key); }
+    TouchArea { clicked => { root.clicked(root.key); } }
+    HorizontalLayout {
+        spacing: 4px;
+        Text { text: root.label; font-size: 12px; font-weight: 600; color: Theme.muted; vertical-alignment: center; overflow: elide; }
+        if root.sort == root.key: Text { text: root.desc ? "▼" : "▲"; font-size: 9px; color: Theme.muted; vertical-alignment: center; }
+    }
+}
+
+// SFTP file browser of an SSH session (tab of kind "files").
+component FilesView inherits Rectangle {
+    in-out property <string> path;
+    in property <[FileRow]> rows;
+    in-out property <int> selected: -1;
+    in property <int> sort;
+    in property <bool> desc;
+    in property <string> error;
+    in property <bool> loading;
+    in property <bool> ready;
+    in property <bool> drop-hover;
+    in property <[XferRow]> xfers;
+    callback act(string);
+    callback open-row(int);
+    callback sort-by(int);
+    callback cancel-xfer(int);
+    background: Theme.bg;
+    fs := FocusScope {
+        init => { self.focus(); }
+        key-pressed(e) => {
+            if (e.text == Key.Return && root.selected >= 0) { root.open-row(root.selected); return accept; }
+            if (e.text == Key.Backspace) { root.act("up"); return accept; }
+            if (e.text == Key.Delete && root.selected >= 0) { root.act("delete"); return accept; }
+            if (e.text == Key.F2 && root.selected >= 0) { root.act("rename"); return accept; }
+            if (e.text == Key.UpArrow && root.selected > 0) { root.selected -= 1; return accept; }
+            if (e.text == Key.DownArrow && root.selected < root.rows.length - 1) { root.selected += 1; return accept; }
+            if (e.text == Key.Home && root.rows.length > 0) { root.selected = 0; return accept; }
+            if (e.text == Key.End && root.rows.length > 0) { root.selected = root.rows.length - 1; return accept; }
+            reject
+        }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 4px;
+                height: 28px;
+                RbSmall { icon: @image-url("icons/arrow-up.svg"); label: "Parent"; y: 3px; enabled: root.ready && root.path != "/"; clicked => { root.act("up"); } }
+                RbSmall { icon: @image-url("icons/refresh-cw.svg"); label: "Actualiser"; y: 3px; enabled: root.ready; clicked => { root.act("refresh"); } }
+                path-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.path;
+                    enabled: root.ready;
+                    accessible-label: "Chemin";
+                    accepted => { root.act("go"); fs.focus(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                height: 24px;
+                alignment: start;
+                RbSmall { icon: @image-url("icons/upload.svg"); label: "Téléverser"; tint: #3fb950; y: 1px; enabled: root.ready; clicked => { root.act("upload"); } }
+                RbSmall { icon: @image-url("icons/download.svg"); label: "Télécharger"; tint: #58a6ff; y: 1px; enabled: root.ready && root.selected >= 0 && !root.rows[root.selected].dir; clicked => { root.act("download"); } }
+                RbSmall { icon: @image-url("icons/folder-plus.svg"); label: "Nouveau dossier"; tint: #e3b341; y: 1px; enabled: root.ready; clicked => { root.act("mkdir"); } }
+                RbSmall { icon: @image-url("icons/pencil.svg"); label: "Renommer"; y: 1px; enabled: root.ready && root.selected >= 0; clicked => { root.act("rename"); } }
+                RbSmall { icon: @image-url("icons/trash-2.svg"); label: "Supprimer"; tint: #f85149; y: 1px; enabled: root.ready && root.selected >= 0; clicked => { root.act("delete"); } }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                border-width: root.drop-hover ? 2px : 1px;
+                border-color: root.drop-hover ? Theme.accent : Theme.border;
+                border-radius: 4px;
+                background: root.drop-hover ? Theme.selection.with-alpha(0.35) : Theme.bg-elev;
+                VerticalLayout {
+                    padding: 1px;
+                    HorizontalLayout {
+                        height: 26px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        Rectangle { width: 16px; }
+                        FbHeader { label: "Nom"; key: 0; sort: root.sort; desc: root.desc; horizontal-stretch: 1; clicked(k) => { root.sort-by(k); } }
+                        FbHeader { label: "Taille"; key: 1; sort: root.sort; desc: root.desc; width: 80px; clicked(k) => { root.sort-by(k); } }
+                        FbHeader { label: "Modifié"; key: 2; sort: root.sort; desc: root.desc; width: 120px; clicked(k) => { root.sort-by(k); } }
+                        FbHeader { label: "Droits"; key: 3; sort: root.sort; desc: root.desc; width: 86px; clicked(k) => { root.sort-by(k); } }
+                    }
+                    Rectangle { height: 1px; background: Theme.border-soft; }
+                    if root.error != "" || root.loading || root.rows.length == 0: Text {
+                        height: 40px;
+                        text: root.loading ? "Chargement…" : root.error != "" ? root.error : "Dossier vide";
+                        color: root.error != "" && !root.loading ? #f85149 : Theme.muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for r[i] in root.rows: Rectangle {
+                            height: 26px;
+                            background: i == root.selected ? Theme.selection : row-ta.has-hover ? Theme.bg-hover : transparent;
+                            accessible-role: list-item;
+                            accessible-label: r.name;
+                            accessible-item-selected: i == root.selected;
+                            accessible-action-default => { root.selected = i; root.open-row(i); }
+                            row-ta := TouchArea {
+                                clicked => { root.selected = i; fs.focus(); }
+                                double-clicked => { root.selected = i; root.open-row(i); }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) { root.selected = i; fs.focus(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 10px;
+                                Ico { source: r.dir ? @image-url("icons/folder.svg") : @image-url("icons/file.svg"); tint: r.dir ? #e3b341 : Theme.muted; y: 5px; }
+                                Text { text: r.link ? r.name + "  ↗" : r.name; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; color: Theme.text; }
+                                Text { text: r.size; width: 80px; horizontal-alignment: right; vertical-alignment: center; color: Theme.muted; font-size: 12px; }
+                                Text { text: r.date; width: 120px; vertical-alignment: center; color: Theme.muted; font-size: 12px; }
+                                Text { text: r.perms; width: 86px; vertical-alignment: center; color: Theme.muted; font-size: 12px; font-family: "Consolas"; }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.xfers.length > 0: VerticalLayout {
+                spacing: 2px;
+                HorizontalLayout {
+                    Text { text: "Transferts"; font-size: 12px; font-weight: 600; color: Theme.muted; vertical-alignment: center; horizontal-stretch: 1; }
+                    RbSmall { icon: @image-url("icons/x.svg"); label: "Effacer les transferts terminés"; clicked => { root.act("clear"); } }
+                }
+                for x[i] in root.xfers: HorizontalLayout {
+                    height: 24px;
+                    spacing: 8px;
+                    Ico { source: x.up ? @image-url("icons/upload.svg") : @image-url("icons/download.svg"); tint: x.failed ? #f85149 : x.up ? #3fb950 : #58a6ff; y: 4px; }
+                    Text { text: x.name; width: 170px; vertical-alignment: center; overflow: elide; color: Theme.text; font-size: 12px; }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 60px;
+                        height: 8px;
+                        y: 8px;
+                        border-radius: 4px;
+                        background: Theme.border-soft;
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * max(0, min(1, x.progress));
+                            border-radius: 4px;
+                            background: x.failed ? #f85149 : x.running ? Theme.accent : #3fb950;
+                        }
+                    }
+                    Text { text: x.detail; min-width: 120px; horizontal-stretch: 2; vertical-alignment: center; overflow: elide; color: x.failed ? #f85149 : Theme.muted; font-size: 12px; }
+                    if x.running: RbSmall { icon: @image-url("icons/ban.svg"); label: "Annuler"; y: 1px; clicked => { root.cancel-xfer(i); } }
+                }
+            }
+            Text {
+                text: "Glissez des fichiers depuis l'Explorateur pour les envoyer dans le dossier affiché. Entrée : ouvrir · Retour arrière : parent · F2 : renommer · Suppr : supprimer";
+                font-size: 11px;
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Relay";
     icon: @image-url("icon.png");
@@ -360,6 +535,28 @@ export component AppWindow inherits Window {
     in-out property <int> o-font;
     in-out property <string> o-font-size;
     in-out property <bool> o-copy-select;
+    // Terminal theme, colouring rules, character set (Options / entry editor).
+    in property <[string]> term-theme-names;
+    in property <[string]> es-theme-names;
+    in property <[string]> charset-names;
+    in property <[string]> hl-color-names;
+    in-out property <int> o-term-theme;
+    in-out property <bool> o-bold-bright: true;
+    in-out property <bool> o-highlight;
+    in-out property <int> es-charset;
+    in-out property <bool> es-send-locale;
+    in-out property <int> es-theme;
+    in-out property <int> es-highlight;
+    in property <[ListRow]> hl-rows;
+    in-out property <int> hl-sel: -1;
+    in-out property <string> hl-pattern;
+    in-out property <bool> hl-regex;
+    in-out property <bool> hl-case;
+    in-out property <int> hl-fg;
+    in-out property <int> hl-bg;
+    in-out property <bool> hl-bold;
+    in-out property <bool> hl-enabled: true;
+    callback hl-act(string);
     in-out property <int> o-rdp-res;
     in-out property <string> o-rdp-width;
     in-out property <string> o-rdp-height;
@@ -460,6 +657,34 @@ export component AppWindow inherits Window {
     callback term-mouse(int, int, length, length, bool, bool, bool);
     callback term-wheel(int, length, length, bool);
     in property <string> active-kind;
+    // Replay of a server recording (tab of kind "replay").
+    in property <bool> rp-playing;
+    in property <float> rp-pos;
+    in property <string> rp-time;
+    in-out property <int> rp-speed: 1;
+    callback rp-toggle();
+    callback rp-seek(float);
+    callback rp-speed-changed(int);
+    // SFTP browser of the active "files" tab.
+    in-out property <string> fb-path;
+    in property <[FileRow]> fb-rows;
+    in-out property <int> fb-selected: -1;
+    in property <int> fb-sort;
+    in property <bool> fb-desc;
+    in property <string> fb-error;
+    in property <bool> fb-loading;
+    in property <bool> fb-ready;
+    in property <bool> fb-drop-hover;
+    in property <[XferRow]> fb-xfers;
+    callback fb-act(string);
+    callback fb-open(int);
+    callback fb-sort-by(int);
+    callback fb-cancel(int);
+    // Text prompt (rename, new folder).
+    in property <string> prompt-title;
+    in property <string> prompt-label;
+    in property <string> prompt-ok;
+    in-out property <string> prompt-text;
     in property <bool> can-open-external;
     callback open-external();
     // Session area in window coordinates, for native child windows (RDP).
@@ -569,6 +794,7 @@ export component AppWindow inherits Window {
                     }
                     RbColumn {
                         RbSmall { icon: @image-url("icons/folder-open.svg"); label: "Espaces de travail"; enabled: root.connected; clicked => { root.act("workspaces"); } }
+                        RbSmall { icon: @image-url("icons/folder-open.svg"); label: "Fichiers (SFTP)"; tint: #e3b341; enabled: root.active-kind == "ssh"; clicked => { root.act("sftp"); } }
                     }
                 }
                 RGroup {
@@ -629,6 +855,7 @@ export component AppWindow inherits Window {
                 RGroup {
                     title: "Session";
                     RbLarge { icon: @image-url("icons/maximize.svg"); label: "Plein écran"; tint: #58a6ff; enabled: root.active-kind == "rdp"; clicked => { root.act("fullscreen"); } }
+                    RbLarge { icon: @image-url("icons/folder-open.svg"); label: "Fichiers (SFTP)"; tint: #e3b341; enabled: root.active-kind == "ssh"; clicked => { root.act("sftp"); } }
                 }
             }
             if root.rtab == 2: HorizontalLayout {
@@ -1024,6 +1251,63 @@ export component AppWindow inherits Window {
                     color: #808080;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                }
+                if root.active-kind == "replay": VerticalLayout {
+                    height: root.session-banner != "" ? parent.height - 34px : parent.height;
+                    y: 0;
+                    Image {
+                        vertical-stretch: 1;
+                        source: root.term-image;
+                        image-fit: contain;
+                        accessible-role: image;
+                        accessible-label: "Enregistrement";
+                    }
+                    Rectangle {
+                        height: 40px;
+                        background: Theme.bg-panel;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 10px;
+                            Button { text: root.rp-playing ? "Pause" : "Lecture"; width: 90px; height: 28px; y: 6px; clicked => { root.rp-toggle(); } }
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 1000;
+                                value: root.rp-pos;
+                                accessible-label: "Position";
+                                changed(v) => { root.rp-seek(v); }
+                            }
+                            Text { text: root.rp-time; color: Theme.text; vertical-alignment: center; font-size: 12px; }
+                            ComboBox {
+                                width: 80px;
+                                height: 28px;
+                                y: 6px;
+                                model: ["×0,5", "×1", "×2", "×4", "×8"];
+                                current-index <=> root.rp-speed;
+                                accessible-label: "Vitesse";
+                                selected => { root.rp-speed-changed(self.current-index); }
+                            }
+                        }
+                    }
+                }
+                if root.active-kind == "files": FilesView {
+                    height: root.session-banner != "" ? parent.height - 34px : parent.height;
+                    y: 0;
+                    path <=> root.fb-path;
+                    selected <=> root.fb-selected;
+                    rows: root.fb-rows;
+                    sort: root.fb-sort;
+                    desc: root.fb-desc;
+                    error: root.fb-error;
+                    loading: root.fb-loading;
+                    ready: root.fb-ready;
+                    drop-hover: root.fb-drop-hover;
+                    xfers: root.fb-xfers;
+                    act(a) => { root.fb-act(a); }
+                    open-row(i) => { root.fb-open(i); }
+                    sort-by(k) => { root.fb-sort-by(k); }
+                    cancel-xfer(i) => { root.fb-cancel(i); }
                 }
                 if root.active-kind == "ssh": term-fs := FocusScope {
                     init => { self.focus(); root.term-size(self.width, self.height); }
@@ -1830,6 +2114,16 @@ export component AppWindow inherits Window {
             FormRow { label: "Taille (6 à 48)"; horizontal-stretch: 1; LineEdit { text <=> root.o-font-size; input-type: number; placeholder-text: "14"; } }
         }
         CheckBox { text: "Copier automatiquement le texte sélectionné (comme PuTTY)"; checked <=> root.o-copy-select; }
+        HorizontalLayout {
+            spacing: 10px;
+            FormRow { label: "Thème de couleurs"; horizontal-stretch: 1; ComboBox { model: root.term-theme-names; current-index <=> root.o-term-theme; } }
+            VerticalLayout { alignment: end; CheckBox { text: "Gras = couleurs vives"; checked <=> root.o-bold-bright; } }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            CheckBox { text: "Coloration syntaxique (erreurs, avertissements, adresses…)"; checked <=> root.o-highlight; horizontal-stretch: 1; }
+            Button { text: "Règles…"; clicked => { root.act("hl-rules"); } }
+        }
         Text { text: "Sessions RDP (par défaut)"; font-weight: 600; color: Theme.text; }
         HorizontalLayout {
             spacing: 10px;
@@ -1905,6 +2199,16 @@ export component AppWindow inherits Window {
                 FormRow { label: "Couleurs"; horizontal-stretch: 2; ComboBox { model: ["Gris sur noir", "Vert sur noir", "Blanc sur noir", "Noir sur blanc"]; current-index <=> root.es-scheme; } }
                 FormRow { label: "Historique (lignes)"; horizontal-stretch: 1; LineEdit { text <=> root.es-scrollback; input-type: number; placeholder-text: "5000"; } }
                 FormRow { label: "Keepalive (s, 0 = aucun)"; horizontal-stretch: 1; LineEdit { text <=> root.es-keepalive; input-type: number; placeholder-text: "30"; } }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Thème de couleurs"; horizontal-stretch: 1; ComboBox { model: root.es-theme-names; current-index <=> root.es-theme; } }
+                FormRow { label: "Coloration syntaxique"; horizontal-stretch: 1; ComboBox { model: ["Selon les Options", "Activée", "Désactivée"]; current-index <=> root.es-highlight; } }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Jeu de caractères distant"; horizontal-stretch: 1; ComboBox { model: root.charset-names; current-index <=> root.es-charset; } }
+                VerticalLayout { alignment: end; horizontal-stretch: 1; CheckBox { text: "Envoyer LANG et LC_ALL (langue de Windows)"; checked <=> root.es-send-locale; } }
             }
             CheckBox { text: "Essayer les clés de l'agent SSH (OpenSSH pour Windows, puis Pageant)"; checked <=> root.es-agent; }
             HorizontalLayout {
@@ -2033,5 +2337,86 @@ export component AppWindow inherits Window {
         ok => { root.submit-dialog(); }
         cancel => { root.cancel-dialog(); }
         Text { text: root.confirm-text; wrap: word-wrap; }
+    }
+    if root.dialog == "prompt": Dialog {
+        title: root.prompt-title;
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: root.prompt-ok != "" ? root.prompt-ok : "OK";
+        card-width: 440px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.cancel-dialog(); }
+        FormRow {
+            label: root.prompt-label;
+            prompt-edit := LineEdit {
+                text <=> root.prompt-text;
+                init => { self.focus(); self.select-all(); }
+                accepted => { root.submit-dialog(); }
+            }
+        }
+    }
+    if root.dialog == "hl-rules": Dialog {
+        title: "Règles de coloration syntaxique";
+        error: root.dialog-error;
+        busy: root.busy;
+        ok-text: "Enregistrer";
+        card-width: 760px;
+        ok => { root.submit-dialog(); }
+        cancel => { root.hl-act("cancel"); }
+        Text { text: "La première règle qui correspond l'emporte. Mot = mot entier ; sinon expression régulière (syntaxe Rust regex)."; wrap: word-wrap; color: Theme.muted; font-size: 12px; }
+        HorizontalLayout {
+            spacing: 10px;
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 200px;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: 4px;
+                ListView {
+                    for r[i] in root.hl-rows: Rectangle {
+                        height: 24px;
+                        background: i == root.hl-sel ? Theme.selection : transparent;
+                        accessible-role: list-item;
+                        accessible-label: r.name;
+                        accessible-action-default => { root.hl-sel = i; root.hl-act("select"); }
+                        TouchArea { clicked => { root.hl-sel = i; root.hl-act("select"); } }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            StatusDot { status: r.status; y: 8px; }
+                            Text { text: r.name; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; color: Theme.text; font-family: "Consolas"; font-size: 12px; }
+                            Text { text: r.detail; width: 90px; vertical-alignment: center; color: Theme.muted; font-size: 12px; }
+                            Text { text: r.extra; width: 120px; vertical-alignment: center; color: Theme.muted; font-size: 12px; overflow: elide; }
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 6px;
+                alignment: start;
+                Button { text: "Ajouter"; clicked => { root.hl-act("add"); } }
+                Button { text: "Supprimer"; enabled: root.hl-sel >= 0; clicked => { root.hl-act("delete"); } }
+                Button { text: "Monter"; enabled: root.hl-sel > 0; clicked => { root.hl-act("up"); } }
+                Button { text: "Descendre"; enabled: root.hl-sel >= 0 && root.hl-sel < root.hl-rows.length - 1; clicked => { root.hl-act("down"); } }
+                Button { text: "Règles par défaut"; clicked => { root.hl-act("defaults"); } }
+            }
+        }
+        if root.hl-sel >= 0: VerticalLayout {
+            spacing: 8px;
+            FormRow { label: "Mot ou expression"; LineEdit { text <=> root.hl-pattern; edited => { root.hl-act("apply"); } } }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Texte"; horizontal-stretch: 1; ComboBox { model: root.hl-color-names; current-index <=> root.hl-fg; selected => { root.hl-act("apply"); } } }
+                FormRow { label: "Fond"; horizontal-stretch: 1; ComboBox { model: root.hl-color-names; current-index <=> root.hl-bg; selected => { root.hl-act("apply"); } } }
+            }
+            HorizontalLayout {
+                spacing: 14px;
+                CheckBox { text: "Expression régulière"; checked <=> root.hl-regex; toggled => { root.hl-act("apply"); } }
+                CheckBox { text: "Respecter la casse"; checked <=> root.hl-case; toggled => { root.hl-act("apply"); } }
+                CheckBox { text: "Gras"; checked <=> root.hl-bold; toggled => { root.hl-act("apply"); } }
+                CheckBox { text: "Active"; checked <=> root.hl-enabled; toggled => { root.hl-act("apply"); } }
+            }
+        }
     }
 }

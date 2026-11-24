@@ -152,6 +152,8 @@ fn open_player(ui: &AppWindow, name: String, rec: Recording) {
                 pve: None,
                 pt,
                 rec: None,
+                files: None,
+                replay: None,
                 player: Some(Player {
                     rec,
                     start: Instant::now(),

@@ -7,72 +7,106 @@ use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::sync::Arc;
 
-const BG: [u8; 3] = [0x0c, 0x0c, 0x0c];
-const FG: [u8; 3] = [0xcc, 0xcc, 0xcc];
-/// Campbell palette (Windows Terminal) for the 16 base colors.
-const BASE: [[u8; 3]; 16] = [
-    [0x0c, 0x0c, 0x0c],
-    [0xc5, 0x0f, 0x1f],
-    [0x13, 0xa1, 0x0e],
-    [0xc1, 0x9c, 0x00],
-    [0x00, 0x37, 0xda],
-    [0x88, 0x17, 0x98],
-    [0x3a, 0x96, 0xdd],
-    [0xcc, 0xcc, 0xcc],
-    [0x76, 0x76, 0x76],
-    [0xe7, 0x48, 0x56],
-    [0x16, 0xc6, 0x0c],
-    [0xf9, 0xf1, 0xa5],
-    [0x3b, 0x78, 0xff],
-    [0xb4, 0x00, 0x9e],
-    [0x61, 0xd6, 0xd6],
-    [0xf2, 0xf2, 0xf2],
+use relay_desktop_core::charset::Charset;
+use relay_desktop_core::highlight::Highlighter;
+use relay_desktop_core::termtheme::{Theme, THEMES};
+
+/// Fonts tried, in this order, for characters missing from the terminal font
+/// (file, index in a collection): box drawing and Powerline, symbols, emoji
+/// (monochrome), Japanese, Korean, Chinese.
+const FALLBACK: [(&str, u32); 7] = [
+    ("CascadiaMono.ttf", 0),
+    ("seguisym.ttf", 0),
+    ("seguiemj.ttf", 0),
+    ("msgothic.ttc", 0),
+    ("YuGothR.ttc", 0),
+    ("malgun.ttf", 0),
+    ("simsun.ttc", 0),
 ];
+
+fn fonts_dir() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| r"C:\Windows".into())
+        .join("Fonts")
+}
+
+fn read_font(name: &str, index: u32) -> Option<fontdue::Font> {
+    let bytes = std::fs::read(fonts_dir().join(name)).ok()?;
+    let settings = fontdue::FontSettings {
+        collection_index: index,
+        ..Default::default()
+    };
+    fontdue::Font::from_bytes(bytes, settings).ok()
+}
 
 pub struct Fonts {
     regular: fontdue::Font,
     bold: Option<fontdue::Font>,
+    /// Fallback fonts, loaded on first use.
+    fallback: Vec<(&'static str, u32, std::sync::OnceLock<Option<fontdue::Font>>)>,
 }
 
 impl Fonts {
     /// Loads the Windows font file `file` (falls back on Consolas or another
     /// monospace font shipped with Windows).
     pub fn load(file: &str) -> Option<Arc<Fonts>> {
-        let dir = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| r"C:\Windows".into())
-            .join("Fonts");
-        let read = |name: &str| {
-            std::fs::read(dir.join(name))
-                .ok()
-                .and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok())
-        };
         let (name, regular) = [file, "consola.ttf", "CascadiaMono.ttf", "lucon.ttf", "cour.ttf"]
             .iter()
-            .find_map(|n| read(n).map(|f| (*n, f)))?;
+            .find_map(|n| read_font(n, 0).map(|f| (*n, f)))?;
         let bold = match name {
-            "consola.ttf" => read("consolab.ttf"),
-            "cour.ttf" => read("courbd.ttf"),
+            "consola.ttf" => read_font("consolab.ttf", 0),
+            "cour.ttf" => read_font("courbd.ttf", 0),
             _ => None,
         };
-        Some(Arc::new(Fonts { regular, bold }))
+        let fallback = FALLBACK
+            .iter()
+            .filter(|(f, _)| !f.eq_ignore_ascii_case(name))
+            .map(|(f, i)| (*f, *i, std::sync::OnceLock::new()))
+            .collect();
+        Some(Arc::new(Fonts { regular, bold, fallback }))
+    }
+
+    /// Font drawing `ch`: the terminal font when it has the glyph, else the
+    /// first fallback font that has it.
+    fn pick(&self, ch: char, bold: bool) -> &fontdue::Font {
+        let main = if bold {
+            self.bold.as_ref().unwrap_or(&self.regular)
+        } else {
+            &self.regular
+        };
+        // Private use characters differ between fonts (Powerline is drawn).
+        if main.lookup_glyph_index(ch) != 0 || ('\u{e000}'..='\u{f8ff}').contains(&ch) {
+            return main;
+        }
+        self.fallback
+            .iter()
+            .filter_map(|(file, index, cell)| cell.get_or_init(|| read_font(file, *index)).as_ref())
+            .find(|f| f.lookup_glyph_index(ch) != 0)
+            .unwrap_or(main)
     }
 }
 
-/// Colours and history of a terminal (entry settings).
+/// Colours and history of a terminal (theme of the Options or of the entry).
 #[derive(Clone, Copy)]
 pub struct Style {
+    pub theme: &'static Theme,
     pub fg: [u8; 3],
     pub bg: [u8; 3],
     pub scrollback: usize,
+    /// Bold text in the 8 base colours uses their bright variant.
+    pub bold_bright: bool,
 }
 
 impl Default for Style {
     fn default() -> Self {
+        let theme = &THEMES[0];
         Style {
-            fg: FG,
-            bg: BG,
+            theme,
+            fg: theme.fg,
+            bg: theme.bg,
             scrollback: 5000,
+            bold_bright: true,
         }
     }
 }
@@ -97,6 +131,10 @@ pub struct Term {
     cell_h: usize,
     ascent: f32,
     glyphs: HashMap<(char, bool), (fontdue::Metrics, Vec<u8>)>,
+    /// Remote character set (typed and pasted text is encoded with it).
+    pub charset: Charset,
+    /// Syntax colouring rules, when enabled for this terminal.
+    highlight: Option<Arc<Highlighter>>,
     /// Text selection and the screen (main / alternate) it belongs to.
     sel: Option<(Selection, bool)>,
 }
@@ -105,11 +143,11 @@ fn nz(v: u16) -> NonZeroU16 {
     NonZeroU16::new(v.max(1)).unwrap()
 }
 
-fn color(c: vt100::Color, default: [u8; 3]) -> [u8; 3] {
+fn color(c: vt100::Color, default: [u8; 3], palette: &[[u8; 3]; 16]) -> [u8; 3] {
     match c {
         vt100::Color::Default => default,
         vt100::Color::Rgb(r, g, b) => [r, g, b],
-        vt100::Color::Idx(i) if i < 16 => BASE[i as usize],
+        vt100::Color::Idx(i) if i < 16 => palette[i as usize],
         vt100::Color::Idx(i) if i < 232 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -134,6 +172,8 @@ impl Term {
             ascent: 0.0,
             glyphs: HashMap::new(),
             sel: None,
+            charset: Charset::Utf8,
+            highlight: None,
         };
         t.set_px(px);
         t
@@ -333,7 +373,8 @@ impl Term {
     pub fn render(&mut self) -> SharedPixelBuffer<Rgba8Pixel> {
         let (rows, cols) = self.size();
         let (w, h) = (cols as usize * self.cell_w, rows as usize * self.cell_h);
-        let (fg0, bg0) = (self.style.fg, self.style.bg);
+        let style = self.style;
+        let (fg0, bg0, palette) = (style.fg, style.bg, &style.theme.palette);
         let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
         let px = buf.make_mut_bytes();
         for chunk in px.as_chunks_mut::<4>().0 {
@@ -352,27 +393,58 @@ impl Term {
         let (size, ascent, cell_w, cell_h) = (self.px, self.ascent, self.cell_w, self.cell_h);
         let (cur_r, cur_c) = screen.cursor_position();
         let show_cursor = !screen.hide_cursor() && screen.scrollback() == 0;
+        // Syntax colouring of each visible row (cell contents, None for the
+        // second half of a wide character).
+        let marks: Vec<Vec<Option<relay_desktop_core::highlight::Mark>>> = match &self.highlight {
+            Some(hl) => (0..rows)
+                .map(|r| {
+                    let cells: Vec<Option<String>> = (0..cols)
+                        .map(|c| match screen.cell(r, c) {
+                            Some(cell) if cell.is_wide_continuation() => None,
+                            Some(cell) if cell.has_contents() => Some(cell.contents().to_string()),
+                            _ => Some(" ".to_string()),
+                        })
+                        .collect();
+                    hl.row_marks(&cells)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         for (pass, r) in (0..2).flat_map(|p| (0..rows).map(move |r| (p, r))) {
             for c in 0..cols {
                 let Some(cell) = screen.cell(r, c) else { continue };
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let mut fg = color(cell.fgcolor(), fg0);
-                let mut bg = color(cell.bgcolor(), bg0);
-                if cell.bold() {
+                let mut fg = color(cell.fgcolor(), fg0, palette);
+                let mut bg = color(cell.bgcolor(), bg0, palette);
+                let mut bold = cell.bold();
+                if bold && style.bold_bright {
                     if let vt100::Color::Idx(i) = cell.fgcolor() {
                         if i < 8 {
-                            fg = BASE[i as usize + 8];
+                            fg = palette[i as usize + 8];
                         }
                     }
+                }
+                if let Some(Some(m)) = marks.get(r as usize).and_then(|row| row.get(c as usize)) {
+                    fg = m.fg.unwrap_or(fg);
+                    bg = m.bg.unwrap_or(bg);
+                    bold |= m.bold;
                 }
                 let span: usize = if cell.is_wide() { 2 } else { 1 };
                 let selected = sel
                     .as_ref()
                     .is_some_and(|s| (c..c + span as u16).any(|k| s.contains(first + i64::from(r), k)));
-                if cell.inverse() ^ (show_cursor && r == cur_r && c == cur_c) ^ selected {
+                if cell.inverse() {
                     std::mem::swap(&mut fg, &mut bg);
+                }
+                if show_cursor && r == cur_r && c == cur_c {
+                    (fg, bg) = (bg0, style.theme.cursor);
+                } else if selected {
+                    bg = style.theme.selection;
+                    if fg == bg {
+                        fg = fg0;
+                    }
                 }
                 let (x0, y0) = (c as usize * cell_w, r as usize * cell_h);
                 if pass == 0 {
@@ -390,7 +462,15 @@ impl Term {
                 // its cell is never covered by the next row or column.
                 let text = cell.contents();
                 if let Some(ch) = text.chars().next().filter(|c| !c.is_whitespace()) {
-                    draw_glyph(glyphs, fonts, size, ascent, px, (w, h), (x0, y0), ch, cell.bold(), fg);
+                    let cell = Cell {
+                        origin: (x0, y0),
+                        room: cell_w * span,
+                        height: cell_h,
+                        ch,
+                        bold,
+                        fg,
+                    };
+                    draw_glyph(glyphs, fonts, size, ascent, px, (w, h), cell);
                 }
                 if cell.underline() {
                     let y = y0 + cell_h - 2;
@@ -403,28 +483,72 @@ impl Term {
         }
         buf
     }
+
+    /// Syntax colouring of this terminal (None = off).
+    pub fn set_highlight(&mut self, highlight: Option<Arc<Highlighter>>) {
+        self.highlight = highlight.filter(|h| !h.is_empty());
+    }
+
+    /// Typed or pasted bytes (UTF-8) in the remote character set.
+    pub fn encode_input(&self, bytes: Vec<u8>) -> Vec<u8> {
+        if self.charset == Charset::Utf8 {
+            return bytes;
+        }
+        self.charset.encode(&String::from_utf8_lossy(&bytes))
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_glyph(
-    glyphs: &mut HashMap<(char, bool), (fontdue::Metrics, Vec<u8>)>,
-    fonts: &Fonts,
-    size: f32,
-    ascent: f32,
-    px: &mut [u8],
-    (w, h): (usize, usize),
-    (x0, y0): (usize, usize),
+/// Character to draw in a cell (or two for a wide character).
+struct Cell {
+    origin: (usize, usize),
+    /// Width available in pixels.
+    room: usize,
+    height: usize,
     ch: char,
     bold: bool,
     fg: [u8; 3],
-) {
+}
+
+type GlyphCache = HashMap<(char, bool), (fontdue::Metrics, Vec<u8>)>;
+
+fn draw_glyph(glyphs: &mut GlyphCache, fonts: &Fonts, size: f32, ascent: f32, px: &mut [u8], (w, h): (usize, usize), cell: Cell) {
+    let Cell {
+        origin: (x0, y0),
+        room,
+        height,
+        ch,
+        bold,
+        fg,
+    } = cell;
+    // Powerline separators (no Windows font has them): drawn in the cell.
+    if ('\u{e0b0}'..='\u{e0b3}').contains(&ch) {
+        let solid = ch == '\u{e0b0}' || ch == '\u{e0b2}';
+        let right = ch == '\u{e0b0}' || ch == '\u{e0b1}';
+        let half = height as f32 / 2.0;
+        for dy in 0..height {
+            let y = y0 + dy;
+            // Width of the triangle on this row (point in the middle).
+            let reach = ((1.0 - ((dy as f32 + 0.5) - half).abs() / half) * room as f32).round() as usize;
+            for dx in 0..room {
+                let inside = if solid { dx < reach } else { dx + 1 >= reach && dx <= reach };
+                let x = if right { x0 + dx } else { x0 + room - 1 - dx };
+                if inside && x < w && y < h {
+                    let i = (y * w + x) * 4;
+                    px[i..i + 3].copy_from_slice(&fg);
+                }
+            }
+        }
+        return;
+    }
     let (m, bitmap) = glyphs.entry((ch, bold)).or_insert_with(|| {
-        let font = if bold {
-            fonts.bold.as_ref().unwrap_or(&fonts.regular)
+        let font = fonts.pick(ch, bold);
+        let (m, b) = font.rasterize(ch, size);
+        // A fallback glyph wider than its cells is scaled down to fit.
+        if m.advance_width > room as f32 * 1.05 && m.advance_width > 0.0 {
+            font.rasterize(ch, size * room as f32 / m.advance_width)
         } else {
-            &fonts.regular
-        };
-        font.rasterize(ch, size)
+            (m, b)
+        }
     });
     let top = y0 as i32 + ascent.round() as i32 - m.height as i32 - m.ymin;
     let left = x0 as i32 + m.xmin;
@@ -518,22 +642,7 @@ pub fn key_bytes(text: &str, ctrl: bool, alt: bool, app_cursor: bool) -> Option<
     if ('\u{E000}'..='\u{F8FF}').contains(&c) || ('\u{10}'..='\u{18}').contains(&c) {
         return None;
     }
-    let mut out = Vec::new();
-    if alt {
-        out.push(0x1b);
-    }
-    if ctrl && c.is_ascii() {
-        let b = c.to_ascii_uppercase() as u8;
-        match b {
-            b'@'..=b'_' => out.push(b & 0x1f),
-            b' ' | b'2' => out.push(0),
-            b'/' => out.push(0x1f),
-            _ => return None,
-        }
-    } else {
-        out.extend(c.to_string().as_bytes());
-    }
-    Some(out)
+    relay_desktop_core::charset::char_input(c, ctrl, alt)
 }
 
 #[cfg(test)]

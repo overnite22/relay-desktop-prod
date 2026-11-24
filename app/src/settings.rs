@@ -50,6 +50,18 @@ pub struct Settings {
     pub rdp_width: u32,
     #[serde(default)]
     pub rdp_height: u32,
+    /// Terminal colour theme (`relay_desktop_core::termtheme`), empty = Campbell.
+    #[serde(default)]
+    pub term_theme: String,
+    /// Bold text in the base colours uses their bright variant.
+    #[serde(default = "yes")]
+    pub term_bold_bright: bool,
+    /// Syntax colouring of the terminals (an entry can force it on or off).
+    #[serde(default)]
+    pub term_highlight: bool,
+    /// Colouring rules; None = default set.
+    #[serde(default)]
+    pub term_rules: Option<Vec<relay_desktop_core::highlight::Rule>>,
 }
 
 fn yes() -> bool {
@@ -77,6 +89,10 @@ impl Default for Settings {
             rdp_resolution: None,
             rdp_width: 0,
             rdp_height: 0,
+            term_theme: String::new(),
+            term_bold_bright: true,
+            term_highlight: false,
+            term_rules: None,
         }
     }
 }

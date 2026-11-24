@@ -10,7 +10,7 @@ relay-desktop-core = { path = "../core" }
 keyring = { version = "3", features = ["windows-native"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-slint = { version = "1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility", "raw-window-handle-06"] }
+slint = { version = "1.19", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility", "raw-window-handle-06", "unstable-winit-030"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 fontdue = "0.9.5"
@@ -24,9 +24,9 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false }
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi", "Win32_Globalization"] }
 windows-core = "0.61"
 
 [build-dependencies]
-slint-build = "1"
+slint-build = "1.19"
 winresource = "0.1"

@@ -328,6 +328,10 @@ impl DataSource for ServerSource {
             .map(Option::unwrap_or_default)
     }
 
+    fn recording_data(&self, id: &str) -> Result<String> {
+        self.send("GET", &format!("/api/recordings/{}", seg(id)), None::<&()>)
+    }
+
     fn delete_recording(&self, id: &str) -> Result<()> {
         self.send("DELETE", &format!("/api/recordings/{}", seg(id)), None::<&()>)
             .map(|_| ())

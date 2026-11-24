@@ -19,12 +19,16 @@ sha2 = "0.11.1"
 sha1 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 vt100 = "0.18.1"
 zeroize = { version = "1", features = ["derive"] }
+russh-sftp = "4"
+base64 = "0.23"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

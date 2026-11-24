@@ -24,6 +24,18 @@ fn console_ticket_uses_device_auth_and_encodes_token() {
                 headers.push_str(&h);
             }
             assert!(headers.to_lowercase().contains("authorization: bearer test-device"));
+            // Read the request body: closing with unread data resets the
+            // connection before the client has read the response.
+            let len = headers
+                .lines()
+                .find_map(|h| {
+                    h.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            let mut body_in = vec![0; len];
+            std::io::Read::read_exact(&mut reader, &mut body_in).unwrap();
             let body = if expected.starts_with("GET") {
                 r#"{"user":"test"}"#
             } else {

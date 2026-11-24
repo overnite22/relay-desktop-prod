@@ -30,6 +30,8 @@ pub struct Params {
     pub agent: bool,
     /// Private key file read when `private_key` is empty.
     pub key_file: Option<PathBuf>,
+    /// Environment sent before the shell (LANG, LC_ALL); servers often refuse it.
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -81,6 +83,8 @@ pub fn trust_key(known_hosts: &Path, change: &KeyChange) -> std::io::Result<()> 
 pub enum Input {
     Data(Vec<u8>),
     Resize(u16, u16),
+    /// Opens the SFTP subsystem on a new channel of this connection.
+    OpenSftp(tokio::sync::oneshot::Sender<Result<crate::sftp::Remote, String>>),
     Close,
 }
 
@@ -286,6 +290,9 @@ async fn run(p: Params, mut rx: mpsc::UnboundedReceiver<Input>, events: impl Fn(
         .request_pty(false, "xterm-256color", p.cols.into(), p.rows.into(), 0, 0, &[])
         .await
         .map_err(|e| e.to_string())?;
+    for (name, value) in &p.env {
+        let _ = channel.set_env(false, name.as_str(), value.as_str()).await;
+    }
     channel.request_shell(false).await.map_err(|e| e.to_string())?;
     events(Event::Connected { fingerprint, new_key });
 
@@ -300,12 +307,34 @@ async fn run(p: Params, mut rx: mpsc::UnboundedReceiver<Input>, events: impl Fn(
             input = rx.recv() => match input {
                 Some(Input::Data(bytes)) => channel.data(&bytes[..]).await.map_err(|e| e.to_string())?,
                 Some(Input::Resize(c, r)) => { let _ = channel.window_change(c.into(), r.into(), 0, 0).await; }
+                Some(Input::OpenSftp(reply)) => { let _ = reply.send(open_sftp(&session).await); }
                 Some(Input::Close) | None => { let _ = channel.close().await; break; }
             },
         }
     }
     let _ = session.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     Ok(())
+}
+
+/// `sftp` subsystem on a new channel of an authenticated connection.
+async fn open_sftp(session: &client::Handle<Client>) -> Result<crate::sftp::Remote, String> {
+    let wait = std::time::Duration::from_secs(15);
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("canal SFTP refusé : {e}"))?;
+    channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
+    loop {
+        match tokio::time::timeout(wait, channel.wait()).await {
+            Err(_) => return Err("le serveur ne répond pas à la demande SFTP".into()),
+            Ok(Some(ChannelMsg::Success)) => break,
+            Ok(Some(ChannelMsg::Failure)) | Ok(Some(ChannelMsg::Close)) | Ok(None) => {
+                return Err("SFTP indisponible sur ce serveur (sous-système « sftp » refusé)".into())
+            }
+            Ok(Some(_)) => {}
+        }
+    }
+    crate::sftp::Remote::start(channel.into_stream()).await
 }
 
 /// Outcome of a non-interactive command on one server.
