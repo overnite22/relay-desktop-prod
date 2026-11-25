@@ -1080,6 +1080,7 @@ fn launch(ui: &AppWindow, id: &str, external: bool) {
                     host: launched.host.clone(),
                     port: launched.port,
                     password: password.unwrap_or_default(),
+                    opts: relay_desktop_core::conn::VncOptions::from_settings(&launched.settings),
                 };
                 open_pve(ui, &launched, target)
             }
@@ -1174,9 +1175,22 @@ fn redraw(ui: &AppWindow) {
             x.banner.clone(),
             x.kind,
             x.state == "closed",
+            x.pve.as_ref().is_some_and(|c| c.frame.lock().unwrap().cursor.is_some()),
+            x.entry_id.clone(),
         )
     });
-    if let Some((buf, banner, kind, closed)) = frame {
+    if let Some((buf, banner, kind, closed, client_cursor, entry_id)) = frame {
+        ui.set_console_client_cursor(client_cursor);
+        ui.set_active_sftp(
+            kind == "ssh"
+                && with(|s| {
+                    s.tree
+                        .entries
+                        .iter()
+                        .find(|e| e.id == entry_id)
+                        .is_none_or(|e| relay_desktop_core::conn::sftp_enabled(&e.settings))
+                }),
+        );
         if let Some(buf) = buf {
             ui.set_term_image(slint::Image::from_rgba8(buf));
         } else {
@@ -2031,10 +2045,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(ui) = w.upgrade() else { return };
         active_session(&ui, |s| {
             if let Some(c) = &s.pve {
-                let f = c.frame.lock().unwrap();
+                let mut f = c.frame.lock().unwrap();
                 if width > 0.0 && height > 0.0 && f.width > 0 && f.height > 0 {
                     let px = (x / width * f.width as f32).clamp(0.0, (f.width - 1) as f32) as u16;
                     let py = (y / height * f.height as f32).clamp(0.0, (f.height - 1) as f32) as u16;
+                    f.pointer = Some((px, py));
                     let _ = c.input.send(vnc::X11Event::PointerEvent((px, py, buttons as u8).into()));
                 }
             }

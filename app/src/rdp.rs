@@ -43,7 +43,7 @@ mod imp {
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
     use windows::Win32::System::Com::{
         IConnectionPoint, IConnectionPointContainer, IDispatch, IDispatch_Impl, IDispatch_Vtbl, ITypeInfo, DISPATCH_FLAGS, DISPATCH_METHOD,
-        DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO, INVOKE_PROPERTYPUT,
+        DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO, INVOKEKIND, INVOKE_FUNC, INVOKE_PROPERTYPUT,
     };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
     use windows::Win32::System::Ole::LoadTypeLib;
@@ -281,10 +281,10 @@ mod imp {
         }
     }
 
-    /// Calls `put_<prop>(VARIANT_BOOL)` of a vtable-only IMsRdpClientNonScriptable*
-    /// interface, found by name in the control's type library (no hard-coded
-    /// IID or vtable slot).
-    fn put_nonscriptable_bool(unk: &IUnknown, prop: &str, value: bool) -> Result<(), String> {
+    /// IID and vtable slot of a member of the vtable-only
+    /// IMsRdpClientNonScriptable* interfaces, found by name in the control's
+    /// type library (no hard-coded IID or slot).
+    fn nonscriptable_slot(member: &str, want: INVOKEKIND) -> Result<(GUID, usize), String> {
         unsafe {
             let lib = LoadTypeLib(w!("mstscax.dll")).map_err(|e| e.to_string())?;
             for i in 0..lib.GetTypeInfoCount() {
@@ -304,21 +304,46 @@ mod imp {
                     let Ok(fd) = info.GetFuncDesc(f as u32) else { continue };
                     let (memid, kind, offset) = ((*fd).memid, (*fd).invkind, (*fd).oVft);
                     info.ReleaseFuncDesc(fd);
-                    if kind != INVOKE_PROPERTYPUT {
+                    if kind != want {
                         continue;
                     }
                     let mut fname = BSTR::new();
                     if info
                         .GetDocumentation(memid, Some(&mut fname), None, std::ptr::null_mut(), None)
                         .is_ok()
-                        && fname == prop
+                        && fname == member
                     {
-                        return put_vtable_bool(unk, &iid, offset as usize / std::mem::size_of::<usize>(), value);
+                        return Ok((iid, offset as usize / std::mem::size_of::<usize>()));
                     }
                 }
             }
         }
-        Err(format!("{prop} : propriété absente de mstscax.dll"))
+        Err(format!("{member} : membre absent de mstscax.dll"))
+    }
+
+    /// Calls `put_<prop>(VARIANT_BOOL)` of a IMsRdpClientNonScriptable* interface.
+    fn put_nonscriptable_bool(unk: &IUnknown, prop: &str, value: bool) -> Result<(), String> {
+        let (iid, slot) = nonscriptable_slot(prop, INVOKE_PROPERTYPUT)?;
+        put_vtable_bool(unk, &iid, slot, value)
+    }
+
+    /// IMsRdpClientNonScriptable::SendKeys: scan codes (key down / up) injected
+    /// in the session input, below the local keyboard shortcuts.
+    fn send_keys(unk: &IUnknown, keys: &[(i32, bool)]) -> Result<(), String> {
+        let (iid, slot) = nonscriptable_slot("SendKeys", INVOKE_FUNC)?;
+        let mut up: Vec<i16> = keys.iter().map(|k| if k.1 { -1 } else { 0 }).collect();
+        let mut codes: Vec<i32> = keys.iter().map(|k| k.0).collect();
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            unk.query(&iid, &mut ptr).ok().map_err(|e| e.to_string())?;
+            let vtbl = *(ptr as *const *const usize);
+            type SendKeys = unsafe extern "system" fn(*mut c_void, i32, *mut i16, *mut i32) -> windows::core::HRESULT;
+            let f: SendKeys = std::mem::transmute(*vtbl.add(slot));
+            let hr = f(ptr, codes.len() as i32, up.as_mut_ptr(), codes.as_mut_ptr());
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vtbl.add(2));
+            release(ptr);
+            hr.ok().map_err(|e| e.to_string())
+        }
     }
 
     fn get_string(d: &IDispatch, name: &str, args: Vec<VARIANT>) -> Option<String> {
@@ -626,6 +651,26 @@ mod imp {
             put(&self.ax, "FullScreen", v_bool(true)).is_ok()
         }
 
+        /// Ctrl+Alt+Suppr in the session (scan codes Ctrl, Alt, Delete).
+        pub fn send_cad(&self) -> Result<(), String> {
+            if self.state() != State::Connected {
+                return Err("session non connectée".into());
+            }
+            self.focus();
+            let unk: IUnknown = self.ax.cast().map_err(|e| e.to_string())?;
+            send_keys(
+                &unk,
+                &[
+                    (0x1d, false),
+                    (0x38, false),
+                    (0x53, false),
+                    (0x53, true),
+                    (0x38, true),
+                    (0x1d, true),
+                ],
+            )
+        }
+
         pub fn disconnect(&self) {
             if self.state() != State::Disconnected {
                 let _ = invoke(&self.ax, "Disconnect", DISPATCH_METHOD, vec![]);
@@ -665,6 +710,9 @@ impl RdpSession {
     pub fn resize_desktop(&mut self, _: u32, _: u32) {}
     pub fn enter_full_screen(&mut self) -> bool {
         false
+    }
+    pub fn send_cad(&self) -> Result<(), String> {
+        Err("disponible uniquement sous Windows".into())
     }
     pub fn disconnect(&self) {}
 }

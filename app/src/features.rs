@@ -304,6 +304,19 @@ pub fn act(ui: &AppWindow, id: &str) {
         "dash" => ui.set_active_tab(-1),
         "sftp" => files::open(ui),
         "hl-rules" => connopts::open_rules(ui),
+        "cad" => {
+            let sent = active_session(ui, |x| match (&x.rdp, &x.pve) {
+                (Some(r), _) => r.send_cad(),
+                (None, Some(c)) => {
+                    c.send_cad();
+                    Ok(())
+                }
+                _ => Err("ouvrez d'abord une session RDP ou VNC".into()),
+            });
+            if let Some(Err(e)) = sent {
+                ui.set_status(format!("Ctrl+Alt+Suppr : {e}").into());
+            }
+        }
         "fullscreen" => {
             if active_session(ui, |x| x.rdp.as_mut().map(|r| r.enter_full_screen())).flatten() != Some(true) {
                 ui.set_status("Plein écran : ouvrez d'abord une session RDP connectée.".into());
@@ -819,6 +832,7 @@ fn submit_quick(ui: &AppWindow) {
                     host: launched.host.clone(),
                     port: launched.port,
                     password: password.unwrap_or_default(),
+                    opts: relay_desktop_core::conn::VncOptions::from_settings(&launched.settings),
                 };
                 open_pve(ui, &launched, target);
             }

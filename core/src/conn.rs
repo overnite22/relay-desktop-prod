@@ -2,12 +2,13 @@
 //!
 //! Keys shared with Relay web keep the web names and meaning (`console`,
 //! `disableAudio`, `wallpaper`, `disableCopy`, `disablePaste`, `security`,
-//! `ignoreCert`, `fontName`, `fontSize`, `colorScheme`, `scrollback`). Keys
+//! `ignoreCert`, `fontName`, `fontSize`, `colorScheme`, `scrollback`, `sftp`,
+//! `sftpRoot`, and for VNC `colorDepth`, `readOnly`, `cursor`). Keys
 //! only used by the desktop client are ignored by the server (it stores the
 //! object as is) : `resolution`, `width`, `height`, `colorDepth`, `multiMon`,
 //! `redirectDrives`, `redirectPrinters`, `audioMode`, `gatewayHost`,
 //! `gatewayUsage`, `gatewaySameCreds`, `keyboardHook`, `keepalive`, `sshAgent`, `keyFile`, `charset`, `sendLocale`, `theme`, `highlight`.
-//! Unknown keys (`drive`, `keyboardLayout`, `sftp`, Proxmox keys…) are kept.
+//! Unknown keys (`drive`, `keyboardLayout`, Proxmox keys…) are kept.
 
 use serde_json::{Map, Value};
 
@@ -349,6 +350,10 @@ pub struct SshOptions {
     pub theme: String,
     /// Syntax colouring (`highlight`): None = Options, else on / off.
     pub highlight: Option<bool>,
+    /// `sftp: false`: no "Fichiers (SFTP)" for this entry.
+    pub disable_sftp: bool,
+    /// Starting folder of the file browser (`sftpRoot`); empty = home folder.
+    pub sftp_root: String,
 }
 
 impl SshOptions {
@@ -371,6 +376,8 @@ impl SshOptions {
                 .unwrap_or("")
                 .into(),
             highlight: get_bool(s, "highlight"),
+            disable_sftp: !sftp_enabled(s),
+            sftp_root: get_str(s, "sftpRoot").trim().into(),
         }
     }
 
@@ -408,6 +415,8 @@ impl SshOptions {
                 s.remove("highlight");
             }
         }
+        set_bool(s, "sftp", !self.disable_sftp, true);
+        set_str(s, "sftpRoot", &self.sftp_root);
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -441,6 +450,99 @@ impl SshOptions {
             .find(|(n, _)| n.eq_ignore_ascii_case(name.trim()))
             .map(|(_, f)| *f)
             .unwrap_or("consola.ttf")
+    }
+}
+
+/// Web semantics of `sftp`: only an explicit `false` turns the files button off.
+pub fn sftp_enabled(s: &Settings) -> bool {
+    get_bool(s, "sftp") != Some(false)
+}
+
+/// VNC `colorDepth` values offered by the web (0 = automatic, 8 = 256 colours).
+pub const VNC_DEPTHS: [u32; 5] = [0, 8, 16, 24, 32];
+
+/// Settings of a VNC entry shared with Relay web.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VncOptions {
+    /// `colorDepth`: pixel format asked of the server (0 = automatic, 32 bits).
+    pub color_depth: u32,
+    /// `readOnly`: watch only, no keyboard, mouse or clipboard sent.
+    pub read_only: bool,
+    /// `cursor: "remote"`: the server draws the pointer in the image; otherwise
+    /// the client draws the shape the server sends (Cursor pseudo-encoding).
+    pub remote_cursor: bool,
+}
+
+impl VncOptions {
+    pub fn from_settings(s: &Settings) -> Self {
+        VncOptions {
+            color_depth: get_u32(s, "colorDepth").filter(|d| VNC_DEPTHS.contains(d)).unwrap_or(0),
+            read_only: get_bool(s, "readOnly").unwrap_or(false),
+            remote_cursor: get_str(s, "cursor") == "remote",
+        }
+    }
+
+    pub fn apply(&self, s: &mut Settings) {
+        set_u32(s, "colorDepth", self.color_depth);
+        set_bool(s, "readOnly", self.read_only, false);
+        set_str(s, "cursor", if self.remote_cursor { "remote" } else { "" });
+    }
+
+    /// Pixel format asked of the server for `colorDepth`.
+    pub fn pixels(&self) -> PixelLayout {
+        match self.color_depth {
+            8 => PixelLayout {
+                bits: 8,
+                depth: 8,
+                max: [7, 7, 3],
+                shift: [5, 2, 0],
+            },
+            16 => PixelLayout {
+                bits: 16,
+                depth: 16,
+                max: [31, 63, 31],
+                shift: [11, 5, 0],
+            },
+            _ => PixelLayout::RGBA,
+        }
+    }
+}
+
+/// True-colour little-endian RFB pixel format (red, green, blue).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelLayout {
+    pub bits: u8,
+    pub depth: u8,
+    pub max: [u16; 3],
+    pub shift: [u8; 3],
+}
+
+impl PixelLayout {
+    /// 32 bits, bytes in R, G, B order: the frame format, no conversion.
+    pub const RGBA: PixelLayout = PixelLayout {
+        bits: 32,
+        depth: 24,
+        max: [255; 3],
+        shift: [0, 8, 16],
+    };
+
+    /// Converts pixels of this format to opaque RGBA; `None` when the data is
+    /// not a whole number of pixels.
+    pub fn to_rgba(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let n = usize::from(self.bits / 8);
+        if n == 0 || !data.len().is_multiple_of(n) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(data.len() / n * 4);
+        for px in data.chunks_exact(n) {
+            let v = px.iter().rev().fold(0u32, |a, b| (a << 8) | u32::from(*b));
+            for (max, shift) in self.max.iter().zip(self.shift) {
+                let max = u32::from(*max).max(1);
+                out.push((((v >> shift) & max) * 255 / max) as u8);
+            }
+            out.push(255);
+        }
+        Some(out)
     }
 }
 
@@ -579,6 +681,8 @@ mod tests {
         assert_eq!(o.color_scheme, "");
         assert_eq!(o.keepalive, Some(0));
         assert_eq!(o.keepalive_secs(), 0);
+        assert!(o.disable_sftp && !sftp_enabled(&s));
+        assert!(sftp_enabled(&map(json!({"sftp": "yes"}))));
         let o = SshOptions {
             font_name: "Cascadia Mono".into(),
             font_size: 16,
@@ -589,8 +693,18 @@ mod tests {
             ..Default::default()
         };
         o.apply(&mut s);
-        assert_eq!(s["sftp"], json!(false));
+        assert!(!s.contains_key("sftp") && !s.contains_key("sftpRoot"));
         assert!(!s.contains_key("keepalive"));
+        let off = SshOptions {
+            disable_sftp: true,
+            sftp_root: " /srv/www ".into(),
+            ..Default::default()
+        };
+        let mut t = Settings::new();
+        off.apply(&mut t);
+        assert_eq!(t["sftp"], json!(false));
+        assert_eq!(t["sftpRoot"], json!("/srv/www"));
+        assert_eq!(SshOptions::from_settings(&t).sftp_root, "/srv/www");
         assert_eq!(
             SshOptions::from_settings(&s),
             SshOptions {
@@ -601,6 +715,33 @@ mod tests {
         assert_eq!(SshOptions::font_file("cascadia mono"), "CascadiaMono.ttf");
         assert_eq!(SshOptions::font_file("monospace"), "consola.ttf");
         assert_eq!(o.colors().1, [0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn vnc_options_and_pixels() {
+        let mut s = map(json!({"colorDepth": 15, "readOnly": true, "cursor": "remote"}));
+        let o = VncOptions::from_settings(&s);
+        assert_eq!(o.color_depth, 0);
+        assert!(o.read_only && o.remote_cursor);
+        assert_eq!(o.pixels(), PixelLayout::RGBA);
+        VncOptions {
+            color_depth: 16,
+            ..Default::default()
+        }
+        .apply(&mut s);
+        assert_eq!(s.get("colorDepth"), Some(&json!(16)));
+        assert!(!s.contains_key("readOnly") && !s.contains_key("cursor"));
+        // RGB565 little-endian: pure red, then pure blue.
+        let p = VncOptions::from_settings(&s).pixels();
+        assert_eq!(p.to_rgba(&[0x00, 0xf8, 0x1f, 0x00]).unwrap(), vec![255, 0, 0, 255, 0, 0, 255, 255]);
+        assert!(p.to_rgba(&[0]).is_none());
+        // BGR233 (256 colours): green only.
+        let p = VncOptions {
+            color_depth: 8,
+            ..Default::default()
+        }
+        .pixels();
+        assert_eq!(p.to_rgba(&[0b0001_1100]).unwrap(), vec![0, 255, 0, 255]);
     }
 
     #[test]

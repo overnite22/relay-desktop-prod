@@ -1,6 +1,7 @@
 //! Native RFB client: Proxmox consoles over the authenticated Relay WebSocket,
 //! and direct VNC connections (TCP, VNC Authentication or no password).
 use futures_util::{SinkExt, StreamExt};
+use relay_desktop_core::conn::{PixelLayout, VncOptions};
 use relay_desktop_core::source::PveConsole;
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 use std::sync::{Arc, Mutex};
@@ -14,10 +15,49 @@ pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// Pointer shape drawn by the client (Cursor pseudo-encoding): hotspot,
+    /// size and RGBA pixels; an empty shape hides the pointer.
+    pub cursor: Option<Cursor>,
+    /// Last pointer position (framebuffer pixels).
+    pub pointer: Option<(u16, u16)>,
+}
+pub struct Cursor {
+    hot: (u16, u16),
+    size: (u16, u16),
+    rgba: Vec<u8>,
 }
 impl Frame {
     pub fn image(&self) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
-        (self.width > 0).then(|| SharedPixelBuffer::clone_from_slice(&self.pixels, self.width, self.height))
+        if self.width == 0 {
+            return None;
+        }
+        let mut buf = SharedPixelBuffer::clone_from_slice(&self.pixels, self.width, self.height);
+        if let (Some(c), Some((px, py))) = (&self.cursor, self.pointer) {
+            let out = buf.make_mut_bytes();
+            for cy in 0..c.size.1 as i32 {
+                for cx in 0..c.size.0 as i32 {
+                    let (x, y) = (px as i32 + cx - c.hot.0 as i32, py as i32 + cy - c.hot.1 as i32);
+                    if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                        continue;
+                    }
+                    let s = (cy as usize * c.size.0 as usize + cx as usize) * 4;
+                    let Some(src) = c.rgba.get(s..s + 4) else { continue };
+                    if src[3] != 0 {
+                        let d = (y as usize * self.width as usize + x as usize) * 4;
+                        out[d..d + 3].copy_from_slice(&src[..3]);
+                    }
+                }
+            }
+        }
+        Some(buf)
+    }
+    fn set_cursor(&mut self, r: vnc::Rect, rgba: Vec<u8>) {
+        let ok = rgba.len() == r.width as usize * r.height as usize * 4;
+        self.cursor = Some(Cursor {
+            hot: (r.x, r.y),
+            size: if ok { (r.width, r.height) } else { (0, 0) },
+            rgba: if ok { rgba } else { Vec::new() },
+        });
     }
     fn resize(&mut self, w: u16, h: u16) -> Result<(), String> {
         if w == 0 || h == 0 || w > 8192 || h > 8192 {
@@ -110,6 +150,22 @@ impl Drop for Console {
         }
     }
 }
+impl Console {
+    /// Ctrl+Alt+Suppr as X11 keysyms (Control_L, Alt_L, Delete), like the web.
+    pub fn send_cad(&self) {
+        for down in [true, false] {
+            let keys = [0xffe3, 0xffe9, 0xffff];
+            let order: Vec<u32> = if down {
+                keys.to_vec()
+            } else {
+                keys.iter().rev().copied().collect()
+            };
+            for k in order {
+                let _ = self.input.send(X11Event::KeyEvent((k, down).into()));
+            }
+        }
+    }
+}
 /// What the console connects to.
 pub enum Target {
     Relay(PveConsole),
@@ -117,6 +173,7 @@ pub enum Target {
         host: String,
         port: u16,
         password: zeroize::Zeroizing<String>,
+        opts: VncOptions,
     },
 }
 
@@ -148,7 +205,12 @@ async fn run(
 ) -> Result<(), String> {
     let ticket = match target {
         Target::Relay(t) => t,
-        Target::Direct { host, port, password } => {
+        Target::Direct {
+            host,
+            port,
+            password,
+            opts,
+        } => {
             let tcp = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
                 tokio::net::TcpStream::connect((host.as_str(), port)),
@@ -157,7 +219,7 @@ async fn run(
             .map_err(|_| format!("{host}:{port} : délai de connexion dépassé"))?
             .map_err(|e| format!("{host}:{port} : {e}"))?;
             let _ = tcp.set_nodelay(true);
-            return rfb(tcp, password, frame, input, event).await;
+            return rfb(tcp, password, opts, frame, input, event).await;
         }
     };
     let mut req = ticket
@@ -199,32 +261,46 @@ async fn run(
         }
     }
     let _guard = Guard(transport);
-    rfb(stream, ticket.password, frame, input, event).await
+    // Proxmox consoles keep the pointer drawn by QEMU.
+    let opts = VncOptions {
+        remote_cursor: true,
+        ..Default::default()
+    };
+    rfb(stream, ticket.password, opts, frame, input, event).await
 }
 
 /// RFB session on an established stream, until it ends or the tab closes.
 async fn rfb<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>(
     stream: S,
     password: zeroize::Zeroizing<String>,
+    opts: VncOptions,
     frame: Arc<Mutex<Frame>>,
     mut input: mpsc::UnboundedReceiver<X11Event>,
     event: &(impl Fn(&'static str, String) + Send),
 ) -> Result<(), String> {
+    let layout = opts.pixels();
+    let mut format = PixelFormat::rgba();
+    format.bits_per_pixel = layout.bits;
+    format.depth = layout.depth;
+    [format.red_max, format.green_max, format.blue_max] = layout.max;
+    [format.red_shift, format.green_shift, format.blue_shift] = layout.shift;
+    // The cursor decoder needs 32-bit pixels: at 8 / 16 bits the server draws it.
+    // Read only: the server draws its own pointer where it really is.
+    let local_cursor = !opts.remote_cursor && !opts.read_only && layout == PixelLayout::RGBA;
     let client = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        VncConnector::new(stream)
+        let mut c = VncConnector::new(stream)
             .set_auth_method(async move { Ok(password.to_string()) })
-            .set_pixel_format(PixelFormat::rgba())
+            .set_pixel_format(format)
             // Preferred first: compressed tiles, moved areas, then raw pixels.
             .add_encoding(VncEncoding::Zrle)
             .add_encoding(VncEncoding::Trle)
             .add_encoding(VncEncoding::CopyRect)
             .add_encoding(VncEncoding::Raw)
-            .add_encoding(VncEncoding::DesktopSizePseudo)
-            .allow_shared(true)
-            .build()?
-            .try_start()
-            .await?
-            .finish()
+            .add_encoding(VncEncoding::DesktopSizePseudo);
+        if local_cursor {
+            c = c.add_encoding(VncEncoding::CursorPseudo);
+        }
+        c.allow_shared(true).build()?.try_start().await?.finish()
     })
     .await
     .map_err(|_| "Délai d'authentification VNC dépassé")?
@@ -236,12 +312,18 @@ async fn rfb<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sy
         tokio::select! {
             e=client.recv_event()=>match e.map_err(|_|"Console VNC interrompue")? {
                 VncEvent::SetResolution(s)=>frame.lock().unwrap().resize(s.width,s.height)?,
-                VncEvent::RawImage(r,b)=>frame.lock().unwrap().raw(r,&b)?,
+                VncEvent::RawImage(r,b)=>{
+                    let b = if layout == PixelLayout::RGBA { b } else { layout.to_rgba(&b).ok_or("Rectangle VNC invalide")? };
+                    frame.lock().unwrap().raw(r,&b)?
+                }
                 VncEvent::Copy(dst,src)=>frame.lock().unwrap().copy(dst,src)?,
+                VncEvent::SetCursor(r,b)=>frame.lock().unwrap().set_cursor(r,b),
                 VncEvent::Text(t)=>clip.server_text(&t),
                 VncEvent::Error(_)=>return Err("Erreur de console VNC".into()), _=>{}
             },
             e=input.recv()=>match e {
+                // Read only (`readOnly`): nothing typed, clicked or copied reaches the server.
+                Some(X11Event::KeyEvent(_) | X11Event::PointerEvent(_) | X11Event::CopyText(_)) if opts.read_only => {}
                 Some(e)=>{
                     // The local clipboard goes to the server when the user acts in the session.
                     if matches!(e, X11Event::KeyEvent(_) | X11Event::PointerEvent(_)) {
@@ -315,6 +397,26 @@ mod tests {
         assert_eq!(&f.pixels[12..16], &[1, 2, 3, 255]);
         assert!(f.raw(vnc::Rect { x: 2, ..r }, &[0; 4]).is_err());
         assert!(f.raw(r, &[0; 3]).is_err());
+    }
+    #[test]
+    fn client_cursor_is_drawn_at_the_pointer() {
+        let mut f = Frame::default();
+        f.resize(3, 3).unwrap();
+        let r = vnc::Rect {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 1,
+        };
+        // Hotspot (1, 1): first pixel transparent, second opaque white.
+        f.set_cursor(r, vec![9, 9, 9, 0, 255, 255, 255, 255]);
+        assert_eq!(f.image().unwrap().as_bytes(), f.pixels.as_slice());
+        f.pointer = Some((1, 2));
+        let img = f.image().unwrap();
+        let px = |x: usize, y: usize| &img.as_bytes()[(y * 3 + x) * 4..(y * 3 + x) * 4 + 3];
+        assert_eq!(px(1, 1), &[255, 255, 255]);
+        assert_eq!(px(0, 1), &[0, 0, 0]);
+        assert!(f.pixels.iter().all(|b| *b == 0));
     }
     #[test]
     fn keyboard_mapping() {

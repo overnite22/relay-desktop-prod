@@ -95,6 +95,17 @@ pub fn open(ui: &AppWindow) {
         ui.set_status("Fichiers (SFTP) : ouvrez d'abord une session SSH connectée et activez son onglet.".into());
         return;
     };
+    let allowed = with(|s| {
+        s.tree
+            .entries
+            .iter()
+            .find(|e| e.id == entry_id)
+            .is_none_or(|e| relay_desktop_core::conn::sftp_enabled(&e.settings))
+    });
+    if !allowed {
+        ui.set_status("Fichiers (SFTP) : désactivé pour cette entrée (Modifier > Terminal SSH).".into());
+        return;
+    }
     let id = with(|s| {
         s.next_session += 1;
         s.next_session
@@ -140,6 +151,13 @@ pub fn open(ui: &AppWindow) {
 
 /// Asks the terminal's connection for an SFTP channel, then lists the home folder.
 fn connect(ui: &AppWindow, id: u64, input: tokio::sync::mpsc::UnboundedSender<ssh::Input>) {
+    // Starting folder of the entry (`sftpRoot`), else the home folder.
+    let root = with(|s| {
+        let entry = &s.sessions.iter().find(|x| x.id == id)?.entry_id;
+        let e = s.tree.entries.iter().find(|e| &e.id == entry)?;
+        Some(relay_desktop_core::conn::SshOptions::from_settings(&e.settings).sftp_root)
+    })
+    .unwrap_or_default();
     let (reply, opened) = tokio::sync::oneshot::channel();
     if input.send(ssh::Input::OpenSftp(reply)).is_err() {
         tab_state(ui, id, "closed", "Session SSH fermée : reconnectez-la puis « Reconnecter ».".into());
@@ -151,7 +169,15 @@ fn connect(ui: &AppWindow, id: u64, input: tokio::sync::mpsc::UnboundedSender<ss
             Err(_) => Err("la session SSH s'est fermée".to_string()),
             Ok(Err(e)) => Err(e),
             Ok(Ok(remote)) => {
-                let home = remote.canonical(".").await.unwrap_or_else(|_| "/".into());
+                let start = if root.is_empty() {
+                    Err(String::new())
+                } else {
+                    remote.canonical(&root).await
+                };
+                let home = match start {
+                    Ok(p) => p,
+                    Err(_) => remote.canonical(".").await.unwrap_or_else(|_| "/".into()),
+                };
                 Ok((Arc::new(remote), home))
             }
         };

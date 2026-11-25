@@ -1,9 +1,9 @@
-//! "Connexion RDP" / "Terminal SSH" section of the entry editor: per-entry
+//! "Connexion RDP" / "Terminal SSH" / "Paramètres VNC" section of the entry editor: per-entry
 //! settings stored in the `settings` object of the entry (see core::conn).
 
 use super::*;
 use relay_desktop_core::charset::{Charset, CHARSETS};
-use relay_desktop_core::conn::{Audio, Gateway, KeyHook, COLOR_DEPTHS, RDP_SECURITY, SSH_SCHEMES, TERM_FONTS};
+use relay_desktop_core::conn::{Audio, Gateway, KeyHook, VncOptions, COLOR_DEPTHS, RDP_SECURITY, SSH_SCHEMES, TERM_FONTS, VNC_DEPTHS};
 use relay_desktop_core::highlight::{self, Rule};
 use relay_desktop_core::termtheme;
 
@@ -76,6 +76,12 @@ pub fn load(ui: &AppWindow, e: &Entry) {
     } else {
         termtheme::index_of(&s.theme) as i32 + 1
     });
+    ui.set_es_sftp(!s.disable_sftp);
+    ui.set_es_sftp_root(s.sftp_root.into());
+    let v = VncOptions::from_settings(&e.settings);
+    ui.set_ev_depth(VNC_DEPTHS.iter().position(|d| *d == v.color_depth).unwrap_or(0) as i32);
+    ui.set_ev_read_only(v.read_only);
+    ui.set_ev_remote_cursor(v.remote_cursor);
     ui.set_es_highlight(match s.highlight {
         None => 0,
         Some(true) => 1,
@@ -154,10 +160,18 @@ pub fn store(ui: &AppWindow, e: &mut Entry) -> Result<(), String> {
                     2 => Some(false),
                     _ => None,
                 },
+                disable_sftp: !ui.get_es_sftp(),
+                sftp_root: ui.get_es_sftp_root().trim().into(),
             };
             s.validate()?;
             s.apply(&mut e.settings);
         }
+        Kind::Vnc => VncOptions {
+            color_depth: VNC_DEPTHS.get(ui.get_ev_depth().max(0) as usize).copied().unwrap_or(0),
+            read_only: ui.get_ev_read_only(),
+            remote_cursor: ui.get_ev_remote_cursor(),
+        }
+        .apply(&mut e.settings),
         _ => {}
     }
     Ok(())

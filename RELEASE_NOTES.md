@@ -1,15 +1,17 @@
-Relay Desktop 0.1.4
+Relay Desktop 0.1.5
 
-- SSH sessions now have a built-in SFTP file browser with drag-and-drop uploads, downloads, file and folder actions, transfer progress and cancellation.
-- Server recordings can be played directly in Relay Desktop. Playback controls include pause, seeking and speed.
-- The SSH terminal handles AltGr characters on French keyboards, uses fallback fonts for missing glyphs and supports legacy character sets alongside UTF-8.
-- The SSH terminal offers colour themes and configurable syntax highlighting, with per-entry overrides.
-- Updated Slint to 1.19.0 to pick up the Windows repaint fix for areas that could become transparent when restoring or resizing the window.
+- VNC: new "VNC settings" tab in the entry editor with read-only mode (watch without sending keyboard, mouse or clipboard), server-drawn or locally drawn cursor, and colour depth choice
+- SFTP per SSH entry: enable or disable the "Files (SFTP)" button and set the starting folder of the file browser
+- Session ribbon: Ctrl+Alt+Del button for RDP and VNC sessions
+- These entry settings are shared with Relay web
+
+The MSI is not code-signed yet: Windows SmartScreen may show a warning.
 
 ---
 
-- Les sessions SSH disposent d'un navigateur SFTP intégré avec téléversement par glisser-déposer, téléchargement, gestion des fichiers et dossiers, suivi et annulation des transferts.
-- Les enregistrements du serveur se lisent directement dans Relay Desktop, avec pause, déplacement dans l'enregistrement et réglage de la vitesse.
-- Le terminal SSH gère les caractères AltGr des claviers français, utilise des polices de secours pour les glyphes manquants et prend en charge des jeux de caractères anciens en plus d'UTF-8.
-- Le terminal SSH propose des thèmes et des règles de coloration configurables, avec des réglages par entrée.
-- Slint passe à la version 1.19.0, qui corrige le rafraîchissement des zones pouvant devenir transparentes à la restauration ou au redimensionnement de la fenêtre sous Windows.
+- VNC : nouvel onglet « Paramètres VNC » dans l'éditeur d'entrée, avec lecture seule (observer sans envoyer clavier, souris ni presse-papiers), curseur dessiné par le serveur ou localement, et choix de la profondeur de couleur
+- SFTP par entrée SSH : activation ou désactivation du bouton « Fichiers (SFTP) » et dossier de départ du navigateur de fichiers
+- Ruban de session : bouton Ctrl+Alt+Suppr pour les sessions RDP et VNC
+- Ces réglages d'entrée sont partagés avec Relay web
+
+Le MSI n'est pas encore signé : SmartScreen peut afficher un avertissement.
