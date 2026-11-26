@@ -488,7 +488,6 @@ mod imp {
             let _ = put(ax, "DisconnectedText", v_str("Session déconnectée"));
             let adv = get_dispatch(ax, "AdvancedSettings9").or_else(|_| get_dispatch(ax, "AdvancedSettings2"))?;
             put(&adv, "RDPPort", v_i4(p.port as i32))?;
-            let has_password = p.password.as_ref().is_some_and(|s| !s.is_empty());
             if let Some(pw) = p.password.as_ref().filter(|s| !s.is_empty()) {
                 put(&adv, "ClearTextPassword", v_str(pw))?;
             }
@@ -541,11 +540,9 @@ mod imp {
             if o.security == "rdp" {
                 let _ = put_nonscriptable_bool(unk, "NegotiateSecurityLayer", false);
             }
-            // With a stored password, a refusal ends the session with its reason (banner
-            // and "Reconnecter") instead of a Windows credential prompt.
-            if has_password {
-                let _ = put_nonscriptable_bool(unk, "AllowPromptingForCredentials", false);
-            }
+            // Some servers require interactive credentials even when Relay supplies a password.
+            let _ = put_nonscriptable_bool(unk, "AllowCredentialSaving", false);
+            let _ = put_nonscriptable_bool(unk, "AllowPromptingForCredentials", true);
             Ok(())
         }
 

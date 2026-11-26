@@ -584,6 +584,7 @@ pub fn rdp_disconnect_text(disc: i32, ext: i32) -> Option<String> {
         3591 => Some("compte utilisateur expiré"),
         3847 => Some("mot de passe expiré"),
         4615 => Some("le mot de passe doit être changé avant la première connexion"),
+        8455 => Some("le serveur exige de ressaisir les identifiants"),
         _ => None,
     };
     match (disc_text, ext_text) {
@@ -757,6 +758,12 @@ mod tests {
             Some("Déconnecté : connexion impossible : hôte injoignable ou port fermé")
         );
         assert_eq!(rdp_disconnect_text(2055, 0).as_deref(), Some("Déconnecté : identifiants refusés"));
+        for (disc, ext) in [(3, 10), (8455, 0)] {
+            assert_eq!(
+                rdp_disconnect_text(disc, ext).as_deref(),
+                Some("Déconnecté : le serveur exige de ressaisir les identifiants")
+            );
+        }
         assert_eq!(rdp_disconnect_text(99999, 0), None);
     }
 }

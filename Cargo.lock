@@ -4793,7 +4793,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "arboard",
  "fontdue",
@@ -4819,7 +4819,7 @@ dependencies = [
 
 [[package]]
 name = "relay-desktop-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
