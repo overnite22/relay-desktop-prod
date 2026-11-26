@@ -605,6 +605,11 @@ export component AppWindow inherits Window {
     in-out property <string> c-password;
     in-out property <string> c-totp;
     in-out property <string> c-notes;
+    in-out property <int> c-section;
+    in-out property <string> c-private-key;
+    in-out property <string> c-passphrase;
+    in-out property <bool> c-has-private-key;
+    in-out property <bool> c-remove-key;
     in-out property <string> confirm-text;
     // Confirm button label ("" = "Supprimer").
     in-out property <string> confirm-ok;
@@ -2283,15 +2288,41 @@ export component AppWindow inherits Window {
         card-width: 480px;
         ok => { root.submit-dialog(); }
         cancel => { root.cancel-dialog(); }
-        FormRow { label: "Nom"; LineEdit { text <=> root.c-name; placeholder-text: "Admin domaine"; } }
         HorizontalLayout {
-            spacing: 10px;
-            FormRow { label: "Utilisateur"; horizontal-stretch: 1; LineEdit { text <=> root.c-username; } }
-            FormRow { label: "Domaine"; horizontal-stretch: 1; LineEdit { text <=> root.c-domain; } }
+            alignment: start;
+            spacing: 6px;
+            Button { text: "Général"; primary: root.c-section == 0; clicked => { root.c-section = 0; } }
+            Button { text: "Clé SSH"; primary: root.c-section == 1; clicked => { root.c-section = 1; } }
         }
-        FormRow { label: "Mot de passe (laisser vide pour ne pas le modifier)"; LineEdit { text <=> root.c-password; input-type: password; } }
-        FormRow { label: "Secret TOTP (base32 ou lien otpauth://, facultatif)"; LineEdit { text <=> root.c-totp; input-type: password; } }
-        FormRow { label: "Notes"; TextEdit { text <=> root.c-notes; height: 70px; wrap: word-wrap; } }
+        if root.c-section == 0: VerticalLayout {
+            spacing: 12px;
+            FormRow { label: "Nom"; LineEdit { text <=> root.c-name; placeholder-text: "Admin domaine"; } }
+            HorizontalLayout {
+                spacing: 10px;
+                FormRow { label: "Utilisateur"; horizontal-stretch: 1; LineEdit { text <=> root.c-username; } }
+                FormRow { label: "Domaine"; horizontal-stretch: 1; LineEdit { text <=> root.c-domain; } }
+            }
+            FormRow { label: "Mot de passe (laisser vide pour ne pas le modifier)"; LineEdit { text <=> root.c-password; input-type: password; } }
+            FormRow { label: "Secret TOTP (base32 ou lien otpauth://, facultatif)"; LineEdit { text <=> root.c-totp; input-type: password; } }
+            FormRow { label: "Notes"; TextEdit { text <=> root.c-notes; height: 70px; wrap: word-wrap; } }
+        }
+        if root.c-section == 1: VerticalLayout {
+            spacing: 10px;
+            if root.c-has-private-key: CheckBox { text: "Retirer la clé SSH enregistrée"; checked <=> root.c-remove-key; }
+            if !root.c-remove-key: VerticalLayout {
+                spacing: 10px;
+                FormRow {
+                    label: root.c-has-private-key ? "Clé privée (laisser vide pour conserver la clé enregistrée)"
+                        : root.server-mode ? "Clé privée OpenSSH ou PEM" : "Clé privée OpenSSH, PEM ou PuTTY (.ppk)";
+                    TextEdit { text <=> root.c-private-key; height: 110px; wrap: word-wrap; }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Button { text: "Importer un fichier…"; enabled: !root.busy; clicked => { root.act("cred-key-file"); } }
+                }
+                FormRow { label: "Phrase secrète de la clé importée (si chiffrée)"; LineEdit { text <=> root.c-passphrase; input-type: password; } }
+            }
+        }
     }
 
     if root.dialog == "update": Dialog {

@@ -398,8 +398,26 @@ pub fn act(ui: &AppWindow, id: &str) {
             ui.set_c_notes(c.notes.into());
             ui.set_c_password("".into());
             ui.set_c_totp("".into());
+            ui.set_c_private_key("".into());
+            ui.set_c_passphrase("".into());
+            ui.set_c_has_private_key(c.has_private_key);
+            ui.set_c_remove_key(false);
+            ui.set_c_section(0);
             ui.set_dialog_error("".into());
             ui.set_dialog("credential".into());
+        }
+        #[cfg(windows)]
+        "cred-key-file" => {
+            if let Some(path) = connopts::select_key_file() {
+                match std::fs::read_to_string(path) {
+                    Ok(text) => {
+                        let text = Zeroizing::new(text);
+                        ui.set_c_private_key(text.as_str().into());
+                        ui.set_dialog_error("".into());
+                    }
+                    Err(e) => fail(ui, format!("Impossible de lire le fichier de clé : {e}")),
+                }
+            }
         }
         "cred-copy" | "cred-totp" => {
             let (Some(src), Some(c)) = (source(), selected_cred(ui)) else {
@@ -643,26 +661,44 @@ pub fn submit(ui: &AppWindow) -> bool {
         }
         "credential" => {
             let Some(src) = source() else { return true };
+            let key = ui.get_c_private_key();
+            let key = key.trim();
+            let passphrase = ui.get_c_passphrase();
+            let remove_key = ui.get_c_remove_key();
+            if !remove_key && key.is_empty() && !passphrase.is_empty() {
+                ui.set_c_section(1);
+                fail(ui, "Ajoutez la clé privée correspondant à cette phrase secrète.");
+                return true;
+            }
+            // Omit both fields for ordinary edits. Replace or clear them together.
+            let (private_key, passphrase) = if remove_key {
+                (Some(String::new()), Some(String::new()))
+            } else if key.is_empty() {
+                (None, None)
+            } else {
+                (Some(key.to_owned()), Some(passphrase.to_string()))
+            };
             let pw = ui.get_c_password().to_string();
             let totp = ui.get_c_totp().trim().to_string();
             let id = with(|s| s.cred_edit.clone());
-            let input = CredentialInput {
+            let input = Zeroizing::new(CredentialInput {
                 name: ui.get_c_name().trim().into(),
                 username: ui.get_c_username().trim().into(),
                 domain: ui.get_c_domain().trim().into(),
                 notes: ui.get_c_notes().into(),
                 password: (!pw.is_empty()).then_some(pw),
                 totp: (!totp.is_empty()).then_some(totp),
-                ..Default::default()
-            };
+                private_key,
+                passphrase,
+            });
             bg(
                 ui,
                 "Enregistrement de l'identifiant…",
                 move || {
-                    let mut input = input;
-                    let r = src.save_credential(id.as_deref(), &input);
-                    zeroize::Zeroize::zeroize(&mut input);
-                    r
+                    if let Some(key) = input.private_key.as_deref().filter(|key| !key.is_empty()) {
+                        ssh::decode_private_key(key, input.passphrase.as_deref()).map_err(Error::Invalid)?;
+                    }
+                    src.save_credential(id.as_deref(), &input)
                 },
                 |ui, r| match r {
                     Ok(c) => {

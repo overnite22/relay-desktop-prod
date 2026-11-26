@@ -658,6 +658,8 @@ fn close_dialog(ui: &AppWindow) {
         AppWindow::set_unlock_password,
         AppWindow::set_c_password,
         AppWindow::set_c_totp,
+        AppWindow::set_c_private_key,
+        AppWindow::set_c_passphrase,
         AppWindow::set_q_password,
         AppWindow::set_ss_secret,
     ] {

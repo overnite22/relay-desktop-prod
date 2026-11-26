@@ -177,17 +177,20 @@ pub fn store(ui: &AppWindow, e: &mut Entry) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn select_key_file() -> Option<PathBuf> {
+    let mut dlg = rfd::FileDialog::new().set_title("Clé privée SSH");
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        dlg = dlg.set_directory(PathBuf::from(home).join(".ssh"));
+    }
+    dlg.pick_file()
+}
+
 /// "Parcourir…" of the key file field.
 pub fn pick_key_file(ui: &AppWindow) {
     #[cfg(windows)]
-    {
-        let mut dlg = rfd::FileDialog::new().set_title("Clé privée SSH");
-        if let Some(home) = std::env::var_os("USERPROFILE") {
-            dlg = dlg.set_directory(PathBuf::from(home).join(".ssh"));
-        }
-        if let Some(path) = dlg.pick_file() {
-            ui.set_es_keyfile(path.display().to_string().into());
-        }
+    if let Some(path) = select_key_file() {
+        ui.set_es_keyfile(path.display().to_string().into());
     }
     #[cfg(not(windows))]
     let _ = ui;

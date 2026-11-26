@@ -210,8 +210,7 @@ async fn open(p: &Params, changed: &mut Option<KeyChange>) -> Result<(client::Ha
         .or(from_file.as_ref())
         .filter(|k| !k.trim().is_empty() && !authenticated)
     {
-        let key = russh::keys::decode_secret_key(pem, p.passphrase.as_deref().map(|s| s.as_str()).filter(|s| !s.is_empty()))
-            .map_err(|e| format!("clé privée illisible : {e}"))?;
+        let key = decode_private_key(pem, p.passphrase.as_deref().map(String::as_str))?;
         let hash = session.best_supported_rsa_hash().await.ok().flatten().flatten();
         let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
         authenticated = session
@@ -234,6 +233,11 @@ async fn open(p: &Params, changed: &mut Option<KeyChange>) -> Result<(client::Ha
     }
 
     Ok((session, fingerprint, new_key))
+}
+
+/// Uses the same decoder for the vault editor and for SSH authentication.
+pub fn decode_private_key(key: &str, passphrase: Option<&str>) -> Result<russh::keys::PrivateKey, String> {
+    russh::keys::decode_secret_key(key, passphrase.filter(|s| !s.is_empty())).map_err(|e| format!("clé privée illisible : {e}"))
 }
 
 /// Tries every key of the local SSH agent; errors only mean "not authenticated".

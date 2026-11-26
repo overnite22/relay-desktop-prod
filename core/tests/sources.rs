@@ -125,6 +125,68 @@ fn local_source() {
 }
 
 #[test]
+fn local_ssh_key_update_reaches_linked_and_inherited_entries() {
+    use russh::keys::{encode_pkcs8_pem_encrypted, ssh_key::private::Ed25519Keypair, PrivateKey};
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = LocalSource::create(&dir.path().join("relay.db"), "mot de passe maître").unwrap();
+    let original = CredentialInput {
+        name: "SSH lab".into(),
+        username: "test".into(),
+        password: Some("synthetic password".into()),
+        ..Default::default()
+    };
+    let cred = src.save_credential(None, &original).unwrap();
+    let folder = src
+        .save_folder(&Folder {
+            name: "Linux".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    src.set_folder_credentials(&folder.id, &BTreeMap::from([("ssh".into(), Some(cred.id.clone()))]))
+        .unwrap();
+    let mut linked = Entry::new(Kind::Ssh);
+    linked.name = "Linked".into();
+    linked.host = "linked.example.test".into();
+    linked.credential_id = Some(cred.id.clone());
+    let linked = src.save_entry(&linked).unwrap();
+    let mut inherited = Entry::new(Kind::Ssh);
+    inherited.name = "Inherited".into();
+    inherited.host = "inherited.example.test".into();
+    inherited.folder_id = Some(folder.id);
+    let inherited = src.save_entry(&inherited).unwrap();
+
+    let key = PrivateKey::from(Ed25519Keypair::from_seed(&[42; 32]));
+    let mut encrypted = Vec::new();
+    encode_pkcs8_pem_encrypted(&key, b"test passphrase", 1000, &mut encrypted).unwrap();
+    let saved = src
+        .save_credential(
+            Some(&cred.id),
+            &CredentialInput {
+                password: None,
+                private_key: Some(String::from_utf8(encrypted).unwrap()),
+                passphrase: Some("test passphrase".into()),
+                ..original
+            },
+        )
+        .unwrap();
+    assert_eq!(saved.id, cred.id);
+    assert!(saved.has_password && saved.has_private_key && saved.has_passphrase);
+
+    let tree = src.tree().unwrap();
+    for entry in [linked, inherited] {
+        let id = effective_credential(&tree, &entry).unwrap();
+        let private_key = src.reveal(&id, SecretField::PrivateKey).unwrap();
+        let passphrase = src.reveal(&id, SecretField::Passphrase).unwrap();
+        assert!(ssh::decode_private_key(&private_key, None).is_err());
+        assert_eq!(
+            ssh::decode_private_key(&private_key, Some(&passphrase)).unwrap().public_key(),
+            key.public_key()
+        );
+    }
+}
+
+#[test]
 fn local_rules() {
     let dir = tempfile::tempdir().unwrap();
     let src = LocalSource::create(&dir.path().join("r.db"), "mot de passe maître").unwrap();
